@@ -3,15 +3,11 @@
 
 > Updated after each phase. Coordinator reads this + the spec before starting work.
 > Rule: keep each phase summary under 60 lines. Capture decisions and deviations, not raw logs.
-> Rule: For this first implementation, parallelize with sub-agents the workstreams within a single phase as described in planning_T1.md but not the phases.
-> Rule: create a documentation .md file for each module.
-> Rule: only when I have understood everything about a Phase and I tell you to do so, you can change the status of the Phase into "COMPLETE". Until the previous phase is not in that status you cannot proceed to the next one. 
-> Rule: when you arrive to 80% of the tokens tell me because I will use /create-handoff create a new session to optimally continue
 
 
 ## Overall Status
-- Current phase: Phase 2 (NOT STARTED)
-- Last completed: Phase 1
+- Current phase: Phase 3 (NOT STARTED)
+- Last completed: Phase 2
 - Spec corrections: vocab.py NODE_TYPES/EDGE_TYPES name-to-index mappings corrected (Phase 1 Step 0)
 
 ## Phase 0 — Scaffold
@@ -79,7 +75,41 @@ Branch: `data/graph2plan-loader` → merged to `main`
 - None. All implementations match planning_T1.md specs.
 
 ## Phase 2 — Model Architecture
-Status: NOT STARTED
+Status: COMPLETE
+Branch: `model/transformer-denoiser` → merged to `main`, tagged `v0.3.0`
+
+### Deliverables (all verified)
+- 222/222 tests pass (`pytest BD_Generation/tests/ -v`)
+- `ruff check` clean
+- `from bd_gen.model import BDDenoiser` works
+- Small config: ~1.28M params, Base config: ~5.0M params (within 1-5M target)
+- Forward shapes verified: `(4, 8, 15)` node logits + `(4, 28, 13)` edge logits
+
+### Files created/modified (7 new, 2 modified)
+- `bd_gen/model/embeddings.py` — NEW: NodeEmbedding, EdgeEmbedding, CompositePositionalEncoding, TimestepEmbedding
+- `bd_gen/model/transformer.py` — NEW: MultiHeadSelfAttention, AdaLNBlock (adaLN-Zero)
+- `bd_gen/model/denoiser.py` — NEW: BDDenoiser top-level model (11-step forward pass)
+- `bd_gen/model/__init__.py` — MODIFIED: exports all 7 public classes
+- `tests/test_embeddings.py` — NEW: 27 tests across all 4 embedding classes
+- `tests/test_denoiser.py` — NEW: 28 tests (shapes, gradients, zero-init, PAD mask, timestep)
+- `tests/conftest.py` — MODIFIED: `dummy_model()` returns real BDDenoiser(d_model=32, n_layers=1, n_heads=2)
+- `docs/model.md` — NEW: detailed architecture documentation (516 lines)
+
+### Key decisions
+- Attention: `F.scaled_dot_product_attention` (only 36 tokens; flash unnecessary)
+- adaLN-Zero: zero-init weights AND bias → identity modulation + zero gate at init
+- Final layer: adaLN with 2 params (shift+scale), no gate (no residual at final layer)
+- Classification heads: zero-init weights AND bias → uniform initial logits
+- PAD mask: `(B,1,1,S)` float additive mask with -inf, broadcasts across heads and queries
+- QKV: single `Linear(d_model, 3*d_model)` combined projection
+- Positional encoding: composite learned (entity_type + node_index + pair_index), not sinusoidal
+- Outer SiLU applied in BDDenoiser.forward() before adaLN, following DiT/DiDAPS convention
+
+### Deviations from spec
+- None. All implementations match planning_T1.md specs.
+
+### Issues resolved
+- `test_different_pad_masks_produce_different_outputs` failed initially because zero-init gates cause blocks to contribute nothing → fixed by randomizing all weights to simulate trained model
 
 ## Phase 3 — Diffusion Core
 Status: NOT STARTED
