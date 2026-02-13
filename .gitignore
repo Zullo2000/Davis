@@ -1,5 +1,16 @@
-# ---- Python ----
-.venv/
+# ==================================================================
+# Davis repository .gitignore
+# Only BD_Generation/, .gitignore, and README.md are tracked.
+# Everything else at root level is excluded.
+# ==================================================================
+
+# ---- Exclude everything at root level ----
+/*
+!/BD_Generation/
+!/.gitignore
+!/README.md
+
+# ---- Python (applies everywhere) ----
 __pycache__/
 *.pyc
 *.pyo
@@ -22,23 +33,35 @@ dist/
 .DS_Store
 Thumbs.db
 
-# ---- LaTeX (common build artifacts) ----
-*.aux
-*.bbl
-*.bcf
-*.blg
-*.brf
-*.fdb_latexmk
-*.fls
-*.lof
-*.log
-*.lot
-*.out
-*.run.xml
-*.synctex.gz
-*.toc
-*.nav
-*.snm
-*.vrb
+# ---- ML Data & Artifacts (within BD_Generation/) ----
+BD_Generation/*.mat
+BD_Generation/*.pt
+BD_Generation/*.pth
+BD_Generation/*.ckpt
+BD_Generation/*.safetensors
+BD_Generation/*.npz
+BD_Generation/*.npy
+BD_Generation/*.h5
+BD_Generation/*.hdf5
+BD_Generation/Data/
+BD_Generation/data/
+BD_Generation/data_cache/
 
+# ---- Experiment outputs ----
+BD_Generation/outputs/
+BD_Generation/wandb/
+BD_Generation/runs/
 
+# ---- Large binary files ----
+BD_Generation/*.zip
+BD_Generation/*.tar.gz
+BD_Generation/*.tar.bz2
+
+# ---- Environment ----
+BD_Generation/.env
+BD_Generation/*.env
+
+# ---- IDE / tooling ----
+.claude/
+.tldr/
+.tldrignore

@@ -1,0 +1,14 @@
+defaults:
+  - model: small
+  - data: graph2plan
+  - noise: linear
+  - training: default
+  - eval: default
+  - _self_
+
+seed: 42
+experiment_name: "bd_gen_v1"
+wandb:
+  project: "bd-generation"
+  entity: null
+  mode: "online"
