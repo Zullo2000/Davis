@@ -2,7 +2,12 @@
 # Implementation State
 
 > Updated after each phase. Coordinator reads this + the spec before starting work.
-> Rule: keep each phase summary under 40 lines. Capture decisions and deviations, not raw logs.
+> Rule: keep each phase summary under 60 lines. Capture decisions and deviations, not raw logs.
+> Rule: For this first implementation, parallelize with sub-agents the workstreams within a single phase as described in planning_T1.md but not the phases.
+> Rule: create a documentation .md file for each module.
+> Rule: only when I have understood everything about a Phase and I tell you to do so, you can change the status of the Phase into "COMPLETE". Until the previous phase is not in that status you cannot proceed to the next one. 
+> Rule: when you arrive to 80% of the tokens tell me because I will use /create-handoff create a new session to optimally continue
+
 
 ## Overall Status
 - Current phase: Phase 2 (NOT STARTED)

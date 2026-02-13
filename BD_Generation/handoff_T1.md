@@ -1,104 +1,134 @@
-# Handoff: Phase 1 Data Pipeline — COMPLETE
+# Handoff: Phase 2 Model Architecture — Code Complete, Pending Commits
 
 > **Created:** 2026-02-13
-> **Session purpose:** Complete Phase 1 (Data Pipeline) — test, fix, implement dataset, document.
+> **Session purpose:** Implement Phase 2 (Model Architecture) — transformer denoiser with adaLN-Zero for MDLM diffusion.
 
 ---
 
 ## What was accomplished
 
-### From previous session (vocab verification + code writing)
-- Downloaded and verified `data.mat` against Graph2Plan source code
-- Corrected `vocab.py` NODE_TYPES/EDGE_TYPES mappings (were completely wrong)
-- Wrote `graph2plan_loader.py`, `tokenizer.py`, test suites, `prepare_data.py`
-
-### This session (testing + dataset + docs)
-1. **Ran tests, fixed 2 failures** in `test_loader.py` — mock tests needed `mat_path.touch()` for existence check
-2. **Fixed 2 lint issues** in `test_tokenizer.py` — import sorting, line length
-3. **Tested `prepare_data.py` end-to-end** — 80,788 graphs parsed, stats verified
-4. **Implemented `bd_gen/data/dataset.py`** — BubbleDiagramDataset with splits, class weights, num_rooms_distribution
-5. **Implemented `tests/test_dataset.py`** — 34 tests covering all dataset functionality
-6. **Created module docs** — `docs/graph2plan_loader.md`, `docs/tokenizer.md`, `docs/dataset.md`, updated `docs/vocab.md`
-7. **Two local commits** on `data/graph2plan-loader`:
-   - `48fcdf2` feat(data): implement Phase 1 data pipeline
-   - `48ceec0` docs: add module documentation for Phase 1 data pipeline
+1. **Created branch** `model/transformer-denoiser` from `main`
+2. **Implemented `bd_gen/model/embeddings.py`** (219 lines) — 4 classes:
+   - `NodeEmbedding`: `nn.Embedding(15, d_model)` for room type tokens
+   - `EdgeEmbedding`: `nn.Embedding(13, d_model)` for edge type tokens
+   - `CompositePositionalEncoding`: 3 learned tables (entity_type, node_index, pair_index) + precomputed buffer indices
+   - `TimestepEmbedding`: sinusoidal encoding + MLP projection
+3. **Implemented `bd_gen/model/transformer.py`** (170 lines) — 2 classes:
+   - `MultiHeadSelfAttention`: combined QKV projection, `F.scaled_dot_product_attention`, `(B,1,1,S)` float additive mask
+   - `AdaLNBlock`: 6-param adaLN modulation (shift/scale/gate for attn+FFN), zero-init weights AND bias
+4. **Implemented `bd_gen/model/denoiser.py`** (214 lines) — `BDDenoiser`:
+   - 11-step forward pass: split tokens → embed → concat → pos enc → timestep cond → transformer blocks → final adaLN → split → heads
+   - `_process_t()` helper for flexible timestep input (float, int, 0D/1D tensors)
+   - Zero-init final adaLN (2 params: shift+scale), zero-init classification heads
+   - `condition=None` placeholder for v2 cross-attention
+5. **Wrote `tests/test_embeddings.py`** (221 lines) — 27 tests across all 4 embedding classes
+6. **Wrote `tests/test_denoiser.py`** (441 lines) — 28 tests: forward shapes, `_process_t`, gradient flow, adaLN zero-init, param count, PAD mask, unconditional, timestep variation
+7. **Updated `bd_gen/model/__init__.py`** — exports all 7 public classes
+8. **Updated `tests/conftest.py`** — `dummy_model()` fixture returns real `BDDenoiser(d_model=32, n_layers=1, n_heads=2)` instead of `pytest.skip()`
+9. **Created `docs/model.md`** (516 lines) — detailed architecture documentation with motivations, ASCII diagrams, forward pass walkthrough, design rationale
+10. **All 222 tests pass**, `ruff check` clean
 
 ## Key decisions made
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Indexing | 0-based, no subtraction | Verified: min(rType)=0, max(rType)=12 |
-| Edge inverse | `9 - r` | Symmetric pairing in Graph2Plan vocab |
-| Room types 13/14 | Repurposed as MASK/PAD | External/ExteriorWall never in bubble data |
-| Class weights | Inverse-frequency, PAD excluded | Standard approach; MASK gets weight 0 |
-| num_rooms_distribution | `dist[k]` = P(k+1 rooms) | 0-indexed tensor for 1-based counts |
-| Weights on val/test | `None` | Must only come from training data |
+| Attention impl | `F.scaled_dot_product_attention` | Only 36 tokens for RPLAN; flash attention unnecessary |
+| adaLN modulation | Zero-init weights AND bias | Identity modulation + zero gate at init → stable DiT training |
+| Final layer | adaLN with 2 params (shift+scale), no gate | No residual at final layer; matches DiDAPS DDitFinalLayer |
+| Classification heads | Zero-init weights AND bias | Initial output = all zeros = uniform logits = clean starting point |
+| GELU variant | `nn.GELU()` (exact) | Standard; DiDAPS uses approximate but difference negligible |
+| QKV projection | Single `Linear(d_model, 3*d_model, bias=True)` | Efficient combined projection |
+| PAD mask for SDPA | `(B,1,1,S)` float mask with -inf | Broadcasts across heads and queries |
+| Outer SiLU | Applied in `BDDenoiser.forward()` before adaLN | Follows DiT/DiDAPS convention: `c = SiLU(timestep_embedding(t))` |
 
 ## Current state of the codebase
 
-**Branch:** `data/graph2plan-loader` (2 commits ahead of `main`)
+**Branch:** `model/transformer-denoiser` — NO COMMITS YET (all changes are unstaged)
+
+**Unstaged/untracked changes:**
+- Modified: `bd_gen/model/__init__.py`, `tests/conftest.py`, `implementation_state_T1.md`, `README.md`
+- New files: `bd_gen/model/embeddings.py`, `bd_gen/model/transformer.py`, `bd_gen/model/denoiser.py`, `docs/model.md`, `tests/test_embeddings.py`, `tests/test_denoiser.py`
 
 **All green:**
-- 167/167 tests pass (`pytest BD_Generation/tests/ -v`)
+- 222/222 tests pass (`pytest BD_Generation/tests/ -v`)
 - `ruff check` clean
-- `prepare_data.py` runs end-to-end
-- DataLoader iteration verified
+- `from bd_gen.model import BDDenoiser` works
+- Small config param count: ~1.28M (within 1-5M target)
+- Forward shapes verified: `(4, 8, 15)` and `(4, 28, 13)` for RPLAN
 
-**Phase 1 files (all committed):**
-- `bd_gen/data/vocab.py` — corrected mappings, VERIFIED status
-- `bd_gen/data/graph2plan_loader.py` — .mat parser, caching, validation
-- `bd_gen/data/tokenizer.py` — tokenize/detokenize, PAD vs no-edge
-- `bd_gen/data/dataset.py` — BubbleDiagramDataset, splits, weights
-- `tests/test_loader.py` (23 tests), `tests/test_tokenizer.py` (56 tests), `tests/test_dataset.py` (34 tests)
-- `scripts/prepare_data.py` — download + parse + cache + stats
-- `docs/vocab.md`, `docs/graph2plan_loader.md`, `docs/tokenizer.md`, `docs/dataset.md`
+**Previous phases (committed on `main`):**
+- Phase 0 (Scaffold): 54 tests, tagged `v0.1.0`
+- Phase 1 (Data Pipeline): 167 tests, merged to `main`
 
 **Data files (gitignored):**
 - `BD_Generation/data/data.mat` — 25.3 MB
 - `BD_Generation/data_cache/graph2plan_nmax8.pt` — parsed cache
 
-**Uncommitted:** `README.md` (modified, not part of Phase 1)
-
 ## What remains to be done
 
-### Phase 1 wrap-up
-1. Merge `data/graph2plan-loader` into `main`
-2. Update `implementation_state_T1.md` → COMPLETE after merge
+### Phase 2 wrap-up (immediate)
+1. **Run tests + ruff** to verify everything still passes (do this FIRST)
+2. **Git commit** the Phase 2 files on `model/transformer-denoiser` branch (suggested commits below)
+3. **Merge** `model/transformer-denoiser` into `main` with `--no-ff`
+4. **Tag** `v0.3.0` on main
+5. **Update `implementation_state_T1.md`** — Phase 2 summary (ONLY when user says to mark COMPLETE)
 
-### Phase 2 — Model Architecture
-3. Read spec: `BD_Generation/planning_T1.md` sections on model
-4. Implement `bd_gen/model/` — BDDenoiser transformer with adaLN
-5. Update `conftest.py` `dummy_model()` fixture
+**Suggested commit structure:**
+```
+feat(model): implement embedding modules (NodeEmbedding, EdgeEmbedding, CompositePositionalEncoding, TimestepEmbedding)
+feat(model): implement adaLN-Zero transformer block and MHSA
+feat(model): implement BDDenoiser top-level model
+test(model): add embedding and denoiser tests (55 tests)
+docs(model): add detailed module documentation
+```
 
-### Phase 3-5
-6. Diffusion core (noise schedule, forward/reverse process)
-7. Training loop
-8. Evaluation
+### Phase 3 — Diffusion Core (next phase)
+6. Read spec: `planning_T1.md` sections on noise schedules, forward/reverse process
+7. Implement `bd_gen/diffusion/` — noise schedule, forward noising, ELBO loss
+
+### Phase 4-5
+8. Training loop
+9. Evaluation
 
 ## Files to reference in next session
 
-**Read first:**
-1. `BD_Generation/implementation_state_T1.md` — phase tracker
-2. `BD_Generation/planning_T1.md` — full implementation spec
+**Read first (in order):**
+1. `BD_Generation/implementation_state_T1.md` — phase tracker with rules
+2. `BD_Generation/planning_T1.md` — full implementation spec (Sections 3.2, 5.2, 6 for Phase 2)
 3. This handoff file
 
-**Phase 1 code (complete):**
-4. `BD_Generation/bd_gen/data/dataset.py` — main dataset class
-5. `BD_Generation/bd_gen/data/vocab.py` — all constants
-6. `BD_Generation/tests/conftest.py` — shared fixtures (`vocab_config`, `sample_batch`)
+**Phase 2 code (complete, uncommitted):**
+4. `BD_Generation/bd_gen/model/denoiser.py` — top-level BDDenoiser class
+5. `BD_Generation/bd_gen/model/embeddings.py` — 4 embedding classes
+6. `BD_Generation/bd_gen/model/transformer.py` — MHSA + AdaLNBlock
+7. `BD_Generation/bd_gen/model/__init__.py` — exports
+8. `BD_Generation/docs/model.md` — detailed architecture documentation
 
-**Docs:** `BD_Generation/docs/` — vocab, loader, tokenizer, dataset
+**Phase 2 tests:**
+9. `BD_Generation/tests/test_denoiser.py` — 28 tests
+10. `BD_Generation/tests/test_embeddings.py` — 27 tests
+11. `BD_Generation/tests/conftest.py` — updated `dummy_model()` fixture + `sample_batch`
+
+**Key dependencies:**
+12. `BD_Generation/bd_gen/data/vocab.py` — VocabConfig, vocab sizes, edge_position_to_pair()
+13. `BD_Generation/configs/model/small.yaml` — d_model=128, n_layers=4, n_heads=4
+14. `BD_Generation/configs/model/base.yaml` — d_model=256, n_layers=6, n_heads=8
+
+**Reference (read-only, NOT a dependency):**
+15. `DiDAPS_COPY/backbones/dit.py` — TimestepEmbedder, DDiTBlock, DDitFinalLayer patterns
 
 ## Context for the next session
 
-### Dataset facts
-- **80,788 graphs**, all 4-8 rooms. Distribution: 7 (36.2%), 6 (31.1%), 8 (25.2%), 5 (7.2%), 4 (0.3%)
-- **Edges per graph:** 3-18, mean 10.2. **457 self-loops** filtered by loader.
-- **LivingRoom (0)** in every record. **SecondRoom (7)** most common type overall.
-- **Rarest:** Entrance (10) — 292 occurrences, GuestRoom (8) — 860.
-
-### Architecture notes
+### Architecture facts
 - `VocabConfig(n_max=8)` → `seq_len=36` (8 nodes + 28 edges)
-- PAD vs no-edge: PAD excluded from loss, no-edge is real signal
-- `__getitem__` returns `{"tokens", "pad_mask", "num_rooms"}`
-- Class weights and distribution are attributes on train dataset instance
+- Forward pass: tokens (B,36) → split → embed separately → concat → pos enc → SiLU(timestep_emb) → N transformer blocks → final adaLN + norm → split → heads → (B,8,15) + (B,28,13)
+- Small config: ~1.28M params. Base config: ~5M params.
+
+### Bug fix during implementation
+- `test_different_pad_masks_produce_different_outputs` initially failed because zero-init adaLN gates (gate=0) cause transformer blocks to contribute nothing → attention masking has no observable effect. **Fix:** randomize ALL weights to simulate a trained model, then verify mask matters. Comment in test explains this.
+
+### Important rules (from implementation_state_T1.md)
+- Parallelize workstreams within a phase, NOT across phases
+- Create a docs `.md` for each module
+- Only mark phase COMPLETE when user explicitly says so
+- Alert at 80% token usage for handoff

@@ -96,11 +96,17 @@ def sample_batch() -> dict:
 
 @pytest.fixture
 def dummy_model():
-    """Placeholder for BDDenoiser model fixture.
+    """Small BDDenoiser for fast test execution.
 
-    Returns None until Phase 2 (model architecture) is complete.
-    Once Phase 2 is done, this will return:
-        BDDenoiser(d_model=32, n_layers=1, n_heads=2,
-                   vocab_config=RPLAN_VOCAB_CONFIG)
+    Uses d_model=32, n_layers=1, n_heads=2 with RPLAN_VOCAB_CONFIG.
+    Dropout disabled for deterministic test behavior.
     """
-    pytest.skip("dummy_model requires Phase 2 (model architecture)")
+    from bd_gen.model.denoiser import BDDenoiser
+
+    return BDDenoiser(
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        vocab_config=RPLAN_VOCAB_CONFIG,
+        dropout=0.0,
+    )
