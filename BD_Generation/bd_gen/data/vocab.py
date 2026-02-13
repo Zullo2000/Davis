@@ -4,9 +4,11 @@ This module is the single source of truth for all vocabulary constants,
 index mappings, and dataset-dependent sizing. All other modules import
 from here rather than defining their own constants.
 
-PROVISIONAL WARNING: The NODE_TYPES and EDGE_TYPES lists are based on the
-Graph2Plan paper and MUST be verified against the actual data.mat file
-during Phase 1 (data verification task).
+VERIFIED (Phase 1): NODE_TYPES and EDGE_TYPES match Graph2Plan's
+get_vocab() in Network/model/utils.py. Data uses 0-based indexing.
+Graph2Plan defines 15 room types (0-14) but only 0-12 appear in the
+bubble diagram data — indices 13 (External) and 14 (ExteriorWall) are
+unused, so we repurpose them as MASK and PAD tokens.
 """
 
 from __future__ import annotations
@@ -22,19 +24,19 @@ from torch import Tensor
 # ---------------------------------------------------------------------------
 
 NODE_TYPES: Final[list[str]] = [
-    "MasterRoom",      # 0
-    "SecondRoom",       # 1
-    "LivingRoom",       # 2
-    "Kitchen",          # 3
-    "Bathroom",         # 4
-    "Balcony",          # 5
-    "Entrance",         # 6
-    "DiningRoom",       # 7
-    "StudyRoom",        # 8
-    "StorageRoom",      # 9
-    "WallIn",           # 10
-    "ExternalArea",     # 11
-    "ExternalWall",     # 12
+    "LivingRoom",       # 0  — every floorplan has exactly one
+    "MasterRoom",       # 1
+    "Kitchen",          # 2
+    "Bathroom",         # 3
+    "DiningRoom",       # 4
+    "ChildRoom",        # 5
+    "StudyRoom",        # 6
+    "SecondRoom",       # 7  — most common type (multiple bedrooms)
+    "GuestRoom",        # 8
+    "Balcony",          # 9
+    "Entrance",         # 10
+    "Storage",          # 11
+    "Wall-in",          # 12
 ]
 
 NODE_MASK_IDX: Final[int] = 13
@@ -46,16 +48,16 @@ NODE_VOCAB_SIZE: Final[int] = 15  # 13 room types + MASK + PAD
 # ---------------------------------------------------------------------------
 
 EDGE_TYPES: Final[list[str]] = [
-    "left-of",          # 0
-    "right-of",         # 1
-    "above",            # 2
-    "below",            # 3
-    "left-above",       # 4
-    "left-below",       # 5
-    "right-above",      # 6
-    "right-below",      # 7
-    "inside",           # 8
-    "surrounding",      # 9
+    "left-above",       # 0  — inverse: right-below (9)
+    "left-below",       # 1  — inverse: right-above (8)
+    "left-of",          # 2  — inverse: right-of (7)
+    "above",            # 3  — inverse: below (6)
+    "inside",           # 4  — inverse: surrounding (5)
+    "surrounding",      # 5  — inverse: inside (4)
+    "below",            # 6  — inverse: above (3)
+    "right-of",         # 7  — inverse: left-of (2)
+    "right-above",      # 8  — inverse: left-below (1)
+    "right-below",      # 9  — inverse: left-above (0)
 ]
 
 EDGE_NO_EDGE_IDX: Final[int] = 10
