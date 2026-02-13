@@ -5,8 +5,8 @@
 > Rule: keep each phase summary under 40 lines. Capture decisions and deviations, not raw logs.
 
 ## Overall Status
-- Current phase: Phase 1 (PENDING REVIEW)
-- Last completed: Phase 0
+- Current phase: Phase 2 (NOT STARTED)
+- Last completed: Phase 1
 - Spec corrections: vocab.py NODE_TYPES/EDGE_TYPES name-to-index mappings corrected (Phase 1 Step 0)
 
 ## Phase 0 — Scaffold
@@ -43,8 +43,8 @@ Branch: `setup/repo-scaffold` → merged to `main`, tagged `v0.1.0`
 - `dummy_model()` fixture uses `pytest.skip()` until Phase 2
 
 ## Phase 1 — Data Pipeline
-Status: PENDING REVIEW
-Branch: `data/graph2plan-loader` (from `main`)
+Status: COMPLETE
+Branch: `data/graph2plan-loader` → merged to `main`
 
 ### Deliverables (all verified)
 - 167/167 tests pass (`pytest BD_Generation/tests/ -v`)
