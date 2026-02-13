@@ -4,7 +4,7 @@
 
 `vocab.py` is the **single source of truth** for all vocabulary constants and dataset-dependent sizing in the BD-Gen project. Every other module that needs to know about token types, special indices, or sequence dimensions **must import from this module** rather than defining its own constants. This eliminates the risk of mismatches between model configuration and data processing.
 
-> **PROVISIONAL WARNING**: The `NODE_TYPES` and `EDGE_TYPES` lists are based on the Graph2Plan paper and **MUST be verified against the actual `data.mat` file** during Phase 1 (data verification task). If the real dataset uses different type names, orderings, or counts, this module must be updated first and all downstream code will automatically pick up the changes.
+> **VERIFIED (Phase 1)**: The `NODE_TYPES` and `EDGE_TYPES` lists have been verified against Graph2Plan's `get_vocab()` in `Network/model/utils.py` and the actual `data.mat` contents. Data uses 0-based indexing.
 
 ---
 
@@ -14,43 +14,45 @@
 
 | Index | Name             | Description                     |
 |------:|------------------|---------------------------------|
-|     0 | `MasterRoom`     | Master bedroom                  |
-|     1 | `SecondRoom`     | Secondary bedroom               |
-|     2 | `LivingRoom`     | Living room                     |
-|     3 | `Kitchen`        | Kitchen                         |
-|     4 | `Bathroom`       | Bathroom / toilet               |
-|     5 | `Balcony`        | Balcony                         |
-|     6 | `Entrance`       | Entrance / foyer                |
-|     7 | `DiningRoom`     | Dining room                     |
-|     8 | `StudyRoom`      | Study / office                  |
-|     9 | `StorageRoom`    | Storage / closet                |
-|    10 | `WallIn`         | Interior wall segment           |
-|    11 | `ExternalArea`   | External area                   |
-|    12 | `ExternalWall`   | External wall boundary          |
+|     0 | `LivingRoom`     | Living room (every plan has one)|
+|     1 | `MasterRoom`     | Master bedroom                  |
+|     2 | `Kitchen`        | Kitchen                         |
+|     3 | `Bathroom`       | Bathroom / toilet               |
+|     4 | `DiningRoom`     | Dining room                     |
+|     5 | `ChildRoom`      | Child's bedroom                 |
+|     6 | `StudyRoom`      | Study / office                  |
+|     7 | `SecondRoom`     | Secondary bedroom (most common) |
+|     8 | `GuestRoom`      | Guest room                      |
+|     9 | `Balcony`        | Balcony                         |
+|    10 | `Entrance`       | Entrance / foyer                |
+|    11 | `Storage`        | Storage / closet                |
+|    12 | `Wall-in`        | Interior wall segment           |
 |    13 | **MASK**         | Diffusion mask token            |
 |    14 | **PAD**          | Padding for unused positions    |
 
 - `NODE_VOCAB_SIZE = 15` (13 room types + MASK + PAD)
+- Graph2Plan defines 15 room types (0-14) but only 0-12 appear in bubble diagram data. Indices 13 (External) and 14 (ExteriorWall) are repurposed as MASK and PAD.
 
 ### Edge Vocabulary
 
-| Index | Name             | Description                        |
-|------:|------------------|------------------------------------|
-|     0 | `left-of`        | Node i is left of node j           |
-|     1 | `right-of`       | Node i is right of node j          |
-|     2 | `above`          | Node i is above node j             |
-|     3 | `below`          | Node i is below node j             |
-|     4 | `left-above`     | Node i is left-above node j        |
-|     5 | `left-below`     | Node i is left-below node j        |
-|     6 | `right-above`    | Node i is right-above node j       |
-|     7 | `right-below`    | Node i is right-below node j       |
-|     8 | `inside`         | Node i is inside node j            |
-|     9 | `surrounding`    | Node i surrounds node j            |
-|    10 | **no-edge**      | No spatial relationship exists      |
-|    11 | **MASK**         | Diffusion mask token               |
-|    12 | **PAD**          | Padding for unused edge positions  |
+| Index | Name             | Inverse (9-r)     | Description                        |
+|------:|------------------|--------------------|------------------------------------|
+|     0 | `left-above`     | `right-below` (9)  | Node i is left-above node j        |
+|     1 | `left-below`     | `right-above` (8)  | Node i is left-below node j        |
+|     2 | `left-of`        | `right-of` (7)     | Node i is left of node j           |
+|     3 | `above`          | `below` (6)        | Node i is above node j             |
+|     4 | `inside`         | `surrounding` (5)  | Node i is inside node j            |
+|     5 | `surrounding`    | `inside` (4)       | Node i surrounds node j            |
+|     6 | `below`          | `above` (3)        | Node i is below node j             |
+|     7 | `right-of`       | `left-of` (2)      | Node i is right of node j          |
+|     8 | `right-above`    | `left-below` (1)   | Node i is right-above node j       |
+|     9 | `right-below`    | `left-above` (0)   | Node i is right-below node j       |
+|    10 | **no-edge**      | —                  | No spatial relationship exists      |
+|    11 | **MASK**         | —                  | Diffusion mask token               |
+|    12 | **PAD**          | —                  | Padding for unused edge positions  |
 
 - `EDGE_VOCAB_SIZE = 13` (10 relationships + no-edge + MASK + PAD)
+- The inverse of relationship `r` is simply `9 - r` (Graph2Plan ordered types symmetrically).
 
 ---
 
