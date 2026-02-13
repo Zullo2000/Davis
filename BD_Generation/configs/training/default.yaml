@@ -1,0 +1,11 @@
+lr: 3e-4
+weight_decay: 0.01
+warmup_steps: 1000
+epochs: 500
+optimizer: adamw
+grad_clip: 1.0
+checkpoint_every: 50
+sample_every: 25
+val_every: 5
+ema: false
+importance_sampling: false
