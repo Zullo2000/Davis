@@ -110,3 +110,42 @@ def dummy_model():
         vocab_config=RPLAN_VOCAB_CONFIG,
         dropout=0.0,
     )
+
+
+# ---------------------------------------------------------------------------
+# Diffusion fixtures (Phase 3+)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def linear_schedule():
+    """LinearSchedule with default parameters (sigma_min=0, sigma_max=10)."""
+    from bd_gen.diffusion.noise_schedule import LinearSchedule
+
+    return LinearSchedule(sigma_min=0.0, sigma_max=10.0)
+
+
+@pytest.fixture
+def cosine_schedule():
+    """CosineSchedule with default parameters (eps=1e-3)."""
+    from bd_gen.diffusion.noise_schedule import CosineSchedule
+
+    return CosineSchedule(eps=1e-3)
+
+
+@pytest.fixture
+def edge_class_weights():
+    """Uniform edge class weights for testing (all 1.0)."""
+    return torch.ones(EDGE_VOCAB_SIZE, dtype=torch.float32)
+
+
+@pytest.fixture
+def elbo_loss(edge_class_weights, vocab_config):
+    """ELBOLoss with uniform weights for testing."""
+    from bd_gen.diffusion.loss import ELBOLoss
+
+    return ELBOLoss(
+        edge_class_weights=edge_class_weights,
+        node_class_weights=None,
+        vocab_config=vocab_config,
+    )
