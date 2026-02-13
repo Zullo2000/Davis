@@ -6,9 +6,9 @@
 
 
 ## Overall Status
-- Current phase: Phase 3 (NOT STARTED)
-- Last completed: Phase 2
-- Spec corrections: vocab.py NODE_TYPES/EDGE_TYPES name-to-index mappings corrected (Phase 1 Step 0)
+- Current phase: Phase 4 (NOT STARTED)
+- Last completed: Phase 3
+- Spec corrections: vocab.py NODE_TYPES/EDGE_TYPES name-to-index mappings corrected (Phase 1 Step 0); loss_mask formula corrected (Phase 3)
 
 ## Phase 0 — Scaffold
 Status: COMPLETE
@@ -112,7 +112,47 @@ Branch: `model/transformer-denoiser` → merged to `main`, tagged `v0.3.0`
 - `test_different_pad_masks_produce_different_outputs` failed initially because zero-init gates cause blocks to contribute nothing → fixed by randomizing all weights to simulate trained model
 
 ## Phase 3 — Diffusion Core
-Status: NOT STARTED
+Status: COMPLETE
+Branch: `diffusion/noise-and-loss` → merged to `main`, tagged `v0.4.0`
+
+### Deliverables (all verified)
+- 304/304 tests pass (`pytest BD_Generation/tests/ -v`)
+- `ruff check` clean (all source and tests)
+- `from bd_gen.diffusion import forward_mask, ELBOLoss, sample, get_noise` works
+- Full pipeline: forward_mask → BDDenoiser → ELBOLoss → backward() flows gradients
+- Sampling: `sample(model, schedule, vc, B=4, num_steps=10)` produces (4, 36) with no MASK tokens
+
+### Files created/modified (8 new, 1 modified)
+- `bd_gen/diffusion/noise_schedule.py` — NEW: NoiseSchedule ABC, LinearSchedule, CosineSchedule, get_noise factory
+- `bd_gen/diffusion/forward_process.py` — NEW: forward_mask with PAD protection
+- `bd_gen/diffusion/loss.py` — NEW: ELBOLoss with dual-vocabulary CE, ELBO weighting, per-sample normalization
+- `bd_gen/diffusion/sampling.py` — NEW: reverse sampling loop with guidance/inpainting/remasking hooks
+- `bd_gen/diffusion/__init__.py` — MODIFIED: exports all 7 public symbols
+- `tests/test_forward_process.py` — NEW: 34 tests (schedules, forward mask, PAD stress, masking rate)
+- `tests/test_loss.py` — NEW: 27 tests (PAD exclusion, class weighting, adversarial cases, gradient balance)
+- `tests/test_sampling.py` — NEW: 21 tests (shapes, temperature, num_rooms, PAD, guidance, adversarial)
+- `tests/conftest.py` — MODIFIED: added 4 diffusion fixtures (linear_schedule, cosine_schedule, edge_class_weights, elbo_loss)
+- `docs/diffusion.md` — NEW: module documentation
+
+### Key decisions
+- NoiseSchedule inherits abc.ABC + nn.Module (follows DiDAPS pattern, enables register_buffer for device handling)
+- CosineSchedule overrides alpha(t) with direct formula (avoids exp(-(-log(x))) numerical roundtrip)
+- Importance sampling: clamp sigma_min ≥ 1e-4 to avoid log(0) when sigma_min=0
+- loss_mask = mask_indicators AND pad_mask (CORRECTED spec typo: spec said AND NOT pad_mask)
+- forward_mask and ELBOLoss accept vocab_config parameter (spec omitted it but n_max is needed for node/edge split)
+- guidance_fn receives/returns (node_logits, edge_logits) tuple (spec said single tensor but model returns tuple)
+- Gumbel noise in float64 for numerical stability
+- w(t) double-clamped: t ≥ 1e-5 AND w ≤ 1000
+- N_active clamped to min 1.0 for safe division
+
+### Deviations from spec
+- Added `vocab_config` parameter to `forward_mask` and `ELBOLoss` (spec signatures omitted it)
+- Corrected loss_mask formula: `mask_indicators & pad_mask` (not `mask_indicators & ~pad_mask`)
+- guidance_fn receives tuple of logits, not single tensor (matches model output structure)
+
+### Issues resolved
+- importance_sampling_transformation NaN at t=1 when sigma_min=0 (0 × -inf = NaN) → clamped sigma_min ≥ 1e-4
+- Degenerate Gumbel test: zero-init model has near-uniform logits → tested with synthetic peaked logits instead
 
 ## Phase 4 — Training Loop
 Status: NOT STARTED
