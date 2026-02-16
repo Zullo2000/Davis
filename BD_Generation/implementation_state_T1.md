@@ -6,8 +6,8 @@
 
 
 ## Overall Status
-- Current phase: Phase 5 (NOT STARTED)
-- Last completed: Phase 4
+- Current phase: All phases complete (v1 pipeline)
+- Last completed: Phase 5
 - Spec corrections: vocab.py NODE_TYPES/EDGE_TYPES name-to-index mappings corrected (Phase 1 Step 0); loss_mask formula corrected (Phase 3)
 
 ## Phase 0 — Scaffold
@@ -205,4 +205,36 @@ Branch: `training/basic-loop` → merged to `main`, tagged `v0.5.0`
 - wandb API key format mismatch → `wandb.mode=disabled`
 
 ## Phase 5 — Evaluation
-Status: NOT STARTED
+Status: COMPLETE
+Branch: `eval/metrics-and-validity` → merged to `main`
+
+### Deliverables (all verified)
+- 348/348 tests pass (`pytest BD_Generation/tests/ -v`)
+- `ruff check` clean
+- `from bd_gen.eval import check_validity, validity_rate, novelty, diversity, distribution_match` works
+- `from bd_gen.viz import draw_bubble_diagram, draw_bubble_diagram_grid` works
+
+### Files created/modified (11 new, 3 modified)
+- `bd_gen/eval/validity.py` — NEW: graph validity checker (connectivity BFS, room-type constraints, MASK/range checks)
+- `bd_gen/eval/metrics.py` — NEW: evaluation metrics (validity_rate, diversity, novelty, distribution_match, per_class_accuracy)
+- `bd_gen/viz/graph_viz.py` — NEW: bubble diagram visualization (networkx + matplotlib, 13-color room-type palette)
+- `tests/test_validity.py` — NEW: 16 validity tests
+- `tests/test_metrics.py` — NEW: 23 metrics tests
+- `scripts/sample.py` — NEW: generate + visualize samples from checkpoint (Hydra Compose API)
+- `scripts/evaluate.py` — NEW: full evaluation pipeline (generate → validate → metrics → wandb → JSON)
+- `docs/evaluation.md` — NEW: module documentation
+- `notebooks/04_sample_analysis.ipynb` — NEW: sample analysis notebook
+- `bd_gen/eval/__init__.py` — MODIFIED: added exports for all eval functions
+- `bd_gen/viz/__init__.py` — MODIFIED: added exports for draw_bubble_diagram, draw_bubble_diagram_grid
+- `configs/eval/default.yaml` — MODIFIED: expanded with checkpoint_path, batch_size, viz options
+
+### Key decisions
+- `vocab_config` param added to `check_validity` (same precedent as Phase 3: `detokenize` requires it)
+- `novelty` metric uses exact-match hash, not GED (GED is NP-hard; impractical at scale)
+- `consistent` check simplified — upper-triangle format inherently prevents contradictions
+- Visualization backend: `matplotlib.use("Agg")` for headless server compatibility
+- Room-type constraints: at most 1 LivingRoom (idx 0), at most 1 Entrance (idx 10)
+
+### Deviations from spec
+- Added `vocab_config` parameter to `check_validity` (spec signature omitted it)
+- `novelty` uses hash-based exact match instead of GED (practical constraint)
