@@ -3,7 +3,7 @@
 Draws bubble diagrams as labeled networkx graphs with room-type-colored
 nodes and spatially-labeled edges. Supports single graphs and grids.
 
-Uses the Agg backend by default for headless server compatibility.
+Compatible with any matplotlib backend (inline for notebooks, Agg for scripts).
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-import matplotlib
 import matplotlib.pyplot as plt
 import networkx as nx
 
@@ -21,8 +20,6 @@ if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
 
-# Use non-interactive backend for headless servers
-matplotlib.use("Agg")
 
 # Room type → color mapping (13 types)
 ROOM_COLORS: dict[int, str] = {

@@ -38,6 +38,7 @@ from bd_gen.diffusion.sampling import sample  # noqa: E402
 from bd_gen.eval.metrics import (  # noqa: E402
     distribution_match,
     diversity,
+    graph_structure_mmd,
     novelty,
     validity_rate,
 )
@@ -220,6 +221,17 @@ def evaluate(cfg: DictConfig) -> None:
         logger.info(
             "Distribution match — node=%.4f, edge=%.4f, rooms=%.4f",
             dm["node_kl"], dm["edge_kl"], dm["num_rooms_kl"],
+        )
+
+    if "graph_structure_mmd" in requested:
+        mmd = graph_structure_mmd(
+            graph_dicts, train_dicts, n_max=cfg.data.n_max,
+        )
+        for key, val in mmd.items():
+            metrics_dict[f"eval/{key}"] = val
+        logger.info(
+            "Structure MMD — degree=%.6f, clustering=%.6f, spectral=%.6f",
+            mmd["mmd_degree"], mmd["mmd_clustering"], mmd["mmd_spectral"],
         )
 
     # --- Detailed validity breakdown ---

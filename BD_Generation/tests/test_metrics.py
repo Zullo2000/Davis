@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from bd_gen.eval.metrics import (
+    _clustering_histogram,
+    _compute_mmd,
+    _degree_histogram,
+    _graph_dict_to_nx,
+    _spectral_features,
     distribution_match,
     diversity,
+    graph_structure_mmd,
     novelty,
     per_class_accuracy,
     validity_rate,
@@ -208,3 +215,224 @@ class TestPerClassAccuracy:
         result = per_class_accuracy(preds, targets, mask)
         assert result["overall"] == 0.0
         assert result["per_class"] == {}
+
+
+# ---------------------------------------------------------------------------
+# _graph_dict_to_nx
+# ---------------------------------------------------------------------------
+
+
+def _make_triangle():
+    """3-node triangle graph dict."""
+    return {
+        "num_rooms": 3,
+        "node_types": [0, 1, 2],
+        "edge_triples": [(0, 1, 2), (0, 2, 3), (1, 2, 0)],
+    }
+
+
+def _make_path3():
+    """3-node path: 0-1-2."""
+    return {
+        "num_rooms": 3,
+        "node_types": [0, 1, 2],
+        "edge_triples": [(0, 1, 2), (1, 2, 3)],
+    }
+
+
+def _make_k4():
+    """Complete graph K4."""
+    return {
+        "num_rooms": 4,
+        "node_types": [0, 1, 2, 3],
+        "edge_triples": [
+            (0, 1, 0), (0, 2, 1), (0, 3, 2),
+            (1, 2, 3), (1, 3, 4), (2, 3, 5),
+        ],
+    }
+
+
+def _make_star3():
+    """Star graph: node 0 connected to 1, 2, 3."""
+    return {
+        "num_rooms": 4,
+        "node_types": [0, 1, 2, 3],
+        "edge_triples": [(0, 1, 0), (0, 2, 1), (0, 3, 2)],
+    }
+
+
+class TestGraphDictToNx:
+    def test_triangle_conversion(self):
+        g = _graph_dict_to_nx(_make_triangle())
+        assert g.number_of_nodes() == 3
+        assert g.number_of_edges() == 3
+
+    def test_empty_graph(self):
+        g = _graph_dict_to_nx({"num_rooms": 0, "node_types": [], "edge_triples": []})
+        assert g.number_of_nodes() == 0
+        assert g.number_of_edges() == 0
+
+    def test_single_node(self):
+        g = _graph_dict_to_nx({"num_rooms": 1, "node_types": [0], "edge_triples": []})
+        assert g.number_of_nodes() == 1
+        assert g.number_of_edges() == 0
+
+    def test_edge_types_ignored(self):
+        """Different edge types produce same topology."""
+        g1 = _graph_dict_to_nx(
+            {"num_rooms": 2, "node_types": [0, 1], "edge_triples": [(0, 1, 0)]}
+        )
+        g2 = _graph_dict_to_nx(
+            {"num_rooms": 2, "node_types": [0, 1], "edge_triples": [(0, 1, 9)]}
+        )
+        assert set(g1.edges()) == set(g2.edges())
+
+
+# ---------------------------------------------------------------------------
+# _degree_histogram
+# ---------------------------------------------------------------------------
+
+
+class TestDegreeHistogram:
+    def test_k4_all_degree_3(self):
+        g = _graph_dict_to_nx(_make_k4())
+        hist = _degree_histogram(g, n_max=8)
+        assert len(hist) == 8
+        assert hist[3] == pytest.approx(1.0)
+        assert sum(hist) == pytest.approx(1.0)
+
+    def test_path3(self):
+        g = _graph_dict_to_nx(_make_path3())
+        hist = _degree_histogram(g, n_max=8)
+        # degrees: 1, 2, 1
+        assert hist[1] == pytest.approx(2 / 3)
+        assert hist[2] == pytest.approx(1 / 3)
+
+    def test_single_node(self):
+        g = _graph_dict_to_nx({"num_rooms": 1, "node_types": [0], "edge_triples": []})
+        hist = _degree_histogram(g, n_max=8)
+        assert hist[0] == pytest.approx(1.0)
+
+    def test_length_matches_n_max(self):
+        g = _graph_dict_to_nx(_make_triangle())
+        for n_max in [4, 8, 14]:
+            hist = _degree_histogram(g, n_max=n_max)
+            assert len(hist) == n_max
+
+
+# ---------------------------------------------------------------------------
+# _clustering_histogram
+# ---------------------------------------------------------------------------
+
+
+class TestClusteringHistogram:
+    def test_complete_graph(self):
+        """K4: all clustering coefficients = 1.0 -> last bin."""
+        g = _graph_dict_to_nx(_make_k4())
+        hist = _clustering_histogram(g, n_bins=10)
+        assert len(hist) == 10
+        assert hist[-1] == pytest.approx(1.0)
+        assert sum(hist) == pytest.approx(1.0)
+
+    def test_star_graph(self):
+        """Star: center cc=0, leaves cc=0 -> first bin = 1.0."""
+        g = _graph_dict_to_nx(_make_star3())
+        hist = _clustering_histogram(g, n_bins=10)
+        assert hist[0] == pytest.approx(1.0)
+
+    def test_sums_to_one(self):
+        g = _graph_dict_to_nx(_make_triangle())
+        hist = _clustering_histogram(g, n_bins=10)
+        assert sum(hist) == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# _spectral_features
+# ---------------------------------------------------------------------------
+
+
+class TestSpectralFeatures:
+    def test_single_node(self):
+        g = _graph_dict_to_nx({"num_rooms": 1, "node_types": [0], "edge_triples": []})
+        spec = _spectral_features(g, n_max=8)
+        assert len(spec) == 8
+        assert all(v == 0.0 for v in spec)
+
+    def test_output_length(self):
+        g = _graph_dict_to_nx(_make_k4())
+        for n_max in [4, 8, 14]:
+            spec = _spectral_features(g, n_max=n_max)
+            assert len(spec) == n_max
+
+    def test_complete_graph_spectrum(self):
+        """K_n normalized Laplacian: eigenvalue 0 (once) and n/(n-1) (n-1 times)."""
+        g = _graph_dict_to_nx(_make_k4())
+        spec = _spectral_features(g, n_max=8)
+        # First eigenvalue should be ~0
+        assert abs(spec[0]) < 1e-6
+        # Next 3 eigenvalues should be ~4/3 for K4
+        for v in spec[1:4]:
+            assert abs(v - 4 / 3) < 1e-6
+
+    def test_disconnected_graph(self):
+        """Two components -> at least two zero eigenvalues."""
+        gd = {
+            "num_rooms": 4,
+            "node_types": [0, 1, 2, 3],
+            "edge_triples": [(0, 1, 0), (2, 3, 1)],  # two disconnected pairs
+        }
+        g = _graph_dict_to_nx(gd)
+        spec = _spectral_features(g, n_max=8)
+        zero_count = sum(1 for v in spec[:4] if abs(v) < 1e-6)
+        assert zero_count >= 2
+
+
+# ---------------------------------------------------------------------------
+# _compute_mmd
+# ---------------------------------------------------------------------------
+
+
+class TestComputeMMD:
+    def test_identical_distributions(self):
+        data = [[1.0, 0.0, 0.0]] * 20
+        assert _compute_mmd(data, data) < 1e-6
+
+    def test_different_distributions(self):
+        x = [[1.0, 0.0, 0.0]] * 20
+        y = [[0.0, 0.0, 1.0]] * 20
+        assert _compute_mmd(x, y) > 0.01
+
+    def test_empty_input(self):
+        assert _compute_mmd([], [[1.0]]) == 0.0
+        assert _compute_mmd([[1.0]], []) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# graph_structure_mmd (integration)
+# ---------------------------------------------------------------------------
+
+
+class TestGraphStructureMMD:
+    def test_identical_sets(self):
+        graphs = [_make_triangle(), _make_k4(), _make_star3()] * 10
+        result = graph_structure_mmd(graphs, graphs, n_max=8)
+        assert result["mmd_degree"] < 1e-6
+        assert result["mmd_clustering"] < 1e-6
+        assert result["mmd_spectral"] < 1e-6
+
+    def test_different_sets(self):
+        samples = [_make_k4()] * 20  # all complete graphs
+        reference = [_make_path3()] * 20  # all paths
+        result = graph_structure_mmd(samples, reference, n_max=8)
+        assert result["mmd_degree"] > 0.001
+        assert result["mmd_spectral"] > 0.001
+
+    def test_returns_three_keys(self):
+        graphs = [_make_triangle()] * 5
+        result = graph_structure_mmd(graphs, graphs, n_max=8)
+        assert set(result.keys()) == {"mmd_degree", "mmd_clustering", "mmd_spectral"}
+
+    def test_empty_samples(self):
+        ref = [_make_triangle()] * 5
+        result = graph_structure_mmd([], ref, n_max=8)
+        assert result == {"mmd_degree": 0.0, "mmd_clustering": 0.0, "mmd_spectral": 0.0}

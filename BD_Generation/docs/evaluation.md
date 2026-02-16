@@ -45,6 +45,21 @@ scripts/
 | Novelty | `novelty(samples, training_set)` | Fraction not in training set (exact match) |
 | Distribution match | `distribution_match(samples, training_set)` | KL divergence of node/edge/num_rooms histograms |
 | Per-class accuracy | `per_class_accuracy(preds, targets, mask)` | Training-time accuracy per class |
+| Graph structure MMD | `graph_structure_mmd(samples, reference)` | MMD on degree, clustering, spectral features |
+
+### Graph Structure MMD (DiGress / MELD / GraphARM Protocol)
+
+`graph_structure_mmd(samples, reference, n_max=8)` computes MMD^2 with Gaussian RBF kernel for three topology-only statistics:
+
+| Sub-metric | Feature | What it catches |
+|------------|---------|----------------|
+| `mmd_degree` | Normalized degree histogram per graph | Connectivity density |
+| `mmd_clustering` | Binned clustering coefficient histogram | Local cliquishness |
+| `mmd_spectral` | Normalized Laplacian eigenvalues | Global graph shape |
+
+Lower values = generated graphs are more structurally similar to the reference set. Uses the median heuristic for kernel bandwidth if `sigma` is not specified.
+
+These metrics are **topology-only** (edge types ignored), complementing `distribution_match` which captures node/edge type distributions.
 
 ### Novelty Implementation
 
@@ -90,7 +105,7 @@ python scripts/evaluate.py \
 ### Python API
 
 ```python
-from bd_gen.eval import check_validity, validity_rate, novelty, diversity
+from bd_gen.eval import check_validity, validity_rate, novelty, diversity, graph_structure_mmd
 from bd_gen.viz import draw_bubble_diagram
 
 # Check a single sample
@@ -101,6 +116,10 @@ print(result["overall"], result["connected"], result["valid_types"])
 v_rate = validity_rate(validity_results)
 div = diversity(graph_dicts)
 nov = novelty(graph_dicts, training_dicts)
+
+# Graph structure MMD (topology-based, lower = better)
+mmd = graph_structure_mmd(graph_dicts, training_dicts, n_max=8)
+print(mmd["mmd_degree"], mmd["mmd_clustering"], mmd["mmd_spectral"])
 
 # Visualize
 fig = draw_bubble_diagram(graph_dict, title="Sample 1")
@@ -115,7 +134,7 @@ fig.savefig("sample.png")
 num_samples: 1000        # Total samples to generate
 sampling_steps: 100      # Denoising steps per sample
 temperature: 0.0         # 0 = argmax, >0 = stochastic
-metrics: [validity, novelty, diversity, distribution_match]
+metrics: [validity, novelty, diversity, distribution_match, graph_structure_mmd]
 checkpoint_path: null     # Required: set via CLI
 batch_size: 64           # Samples per generation batch
 save_samples: true       # Save tokens to .pt

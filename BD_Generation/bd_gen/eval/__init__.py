@@ -3,6 +3,7 @@
 from bd_gen.eval.metrics import (
     distribution_match,
     diversity,
+    graph_structure_mmd,
     novelty,
     per_class_accuracy,
     validity_rate,
@@ -14,6 +15,7 @@ __all__ = [
     "check_validity_batch",
     "distribution_match",
     "diversity",
+    "graph_structure_mmd",
     "novelty",
     "per_class_accuracy",
     "validity_rate",
