@@ -1,134 +1,105 @@
-# Handoff: Phase 2 Model Architecture — Code Complete, Pending Commits
+# Handoff: Phase 4 Complete → GPU Training → Phase 5
 
 > **Created:** 2026-02-13
-> **Session purpose:** Implement Phase 2 (Model Architecture) — transformer denoiser with adaLN-Zero for MDLM diffusion.
+> **Session purpose:** Implement Phase 4 (Training Loop), prepare for GPU training and Phase 5 (Evaluation)
 
 ---
 
 ## What was accomplished
 
-1. **Created branch** `model/transformer-denoiser` from `main`
-2. **Implemented `bd_gen/model/embeddings.py`** (219 lines) — 4 classes:
-   - `NodeEmbedding`: `nn.Embedding(15, d_model)` for room type tokens
-   - `EdgeEmbedding`: `nn.Embedding(13, d_model)` for edge type tokens
-   - `CompositePositionalEncoding`: 3 learned tables (entity_type, node_index, pair_index) + precomputed buffer indices
-   - `TimestepEmbedding`: sinusoidal encoding + MLP projection
-3. **Implemented `bd_gen/model/transformer.py`** (170 lines) — 2 classes:
-   - `MultiHeadSelfAttention`: combined QKV projection, `F.scaled_dot_product_attention`, `(B,1,1,S)` float additive mask
-   - `AdaLNBlock`: 6-param adaLN modulation (shift/scale/gate for attn+FFN), zero-init weights AND bias
-4. **Implemented `bd_gen/model/denoiser.py`** (214 lines) — `BDDenoiser`:
-   - 11-step forward pass: split tokens → embed → concat → pos enc → timestep cond → transformer blocks → final adaLN → split → heads
-   - `_process_t()` helper for flexible timestep input (float, int, 0D/1D tensors)
-   - Zero-init final adaLN (2 params: shift+scale), zero-init classification heads
-   - `condition=None` placeholder for v2 cross-attention
-5. **Wrote `tests/test_embeddings.py`** (221 lines) — 27 tests across all 4 embedding classes
-6. **Wrote `tests/test_denoiser.py`** (441 lines) — 28 tests: forward shapes, `_process_t`, gradient flow, adaLN zero-init, param count, PAD mask, unconditional, timestep variation
-7. **Updated `bd_gen/model/__init__.py`** — exports all 7 public classes
-8. **Updated `tests/conftest.py`** — `dummy_model()` fixture returns real `BDDenoiser(d_model=32, n_layers=1, n_heads=2)` instead of `pytest.skip()`
-9. **Created `docs/model.md`** (516 lines) — detailed architecture documentation with motivations, ASCII diagrams, forward pass walkthrough, design rationale
-10. **All 222 tests pass**, `ruff check` clean
+- **Phase 4 fully implemented, tested, merged to `main`, tagged `v0.5.0`**
+- Created `bd_gen/utils/seed.py` — deterministic seeding (torch/numpy/random/CUDA)
+- Created `bd_gen/utils/checkpoint.py` — save/load training checkpoints with OmegaConf
+- Created `bd_gen/utils/logging_utils.py` — wandb init, metric logging, git hash capture
+- Created `scripts/train.py` — full training loop (Hydra Compose API, validation, sampling, checkpointing, wandb)
+- Created `tests/test_integration.py` — 5 integration tests (train step, loss decrease, checkpoint roundtrip, seed, LR warmup)
+- Created `docs/training.md` — extensive documentation (~390 lines: architecture, config ref, usage, troubleshooting, Google Cloud quickstart)
+- Created `notebooks/03_training_monitoring.ipynb` — wandb dashboard plotting
+- **309/309 tests pass**, ruff clean
+- **CPU debug training verified**: 2 epochs, loss decreased 7.41 → 6.37, checkpoints created
 
 ## Key decisions made
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Attention impl | `F.scaled_dot_product_attention` | Only 36 tokens for RPLAN; flash attention unnecessary |
-| adaLN modulation | Zero-init weights AND bias | Identity modulation + zero gate at init → stable DiT training |
-| Final layer | adaLN with 2 params (shift+scale), no gate | No residual at final layer; matches DiDAPS DDitFinalLayer |
-| Classification heads | Zero-init weights AND bias | Initial output = all zeros = uniform logits = clean starting point |
-| GELU variant | `nn.GELU()` (exact) | Standard; DiDAPS uses approximate but difference negligible |
-| QKV projection | Single `Linear(d_model, 3*d_model, bias=True)` | Efficient combined projection |
-| PAD mask for SDPA | `(B,1,1,S)` float mask with -inf | Broadcasts across heads and queries |
-| Outer SiLU | Applied in `BDDenoiser.forward()` before adaLN | Follows DiT/DiDAPS convention: `c = SiLU(timestep_embedding(t))` |
+| Hydra CLI | Compose API instead of `@hydra.main` | Python 3.14 argparse incompatibility with Hydra 1.3.2 |
+| Output dir | `BD_Generation/outputs/<timestamp>/` | Manual management since Compose API doesn't set up Hydra cwd |
+| Windows workers | Auto-detect and force `num_workers=0` | PyTorch DataLoader multiprocessing unreliable on Windows |
+| Loss decrease test | Fixed `t=0.5` for 50 steps | Random t causes high ELBO weight variance with 4-sample batch |
+| Sample logging | Counts only, no images | `bd_gen/viz/` doesn't exist until Phase 5 |
+| Node class weights | `None` (unweighted) in v1 | Spec says optional; edge weights are the critical ones |
 
 ## Current state of the codebase
 
-**Branch:** `model/transformer-denoiser` — NO COMMITS YET (all changes are unstaged)
+### Package structure (Phases 0–4 complete)
+```
+bd_gen/
+  data/       → dataset, tokenizer, vocab, graph2plan_loader (Phase 1)
+  model/      → BDDenoiser, embeddings, transformer (Phase 2)
+  diffusion/  → forward_mask, ELBOLoss, sample, noise schedules (Phase 3)
+  utils/      → seed, checkpoint, logging_utils (Phase 4)
+  eval/       → empty __init__.py (Phase 5 placeholder)
+  viz/        → empty __init__.py (Phase 5 placeholder)
+scripts/
+  prepare_data.py  → download + cache dataset
+  train.py         → full training loop
+tests/
+  309 tests total, all passing
+```
 
-**Unstaged/untracked changes:**
-- Modified: `bd_gen/model/__init__.py`, `tests/conftest.py`, `implementation_state_T1.md`, `README.md`
-- New files: `bd_gen/model/embeddings.py`, `bd_gen/model/transformer.py`, `bd_gen/model/denoiser.py`, `docs/model.md`, `tests/test_embeddings.py`, `tests/test_denoiser.py`
+### Git state
+- Branch: `main` at `ffb683b`
+- Tags: `v0.1.0` (Phase 0), `v0.3.0` (Phase 2), `v0.4.0` (Phase 3), `v0.5.0` (Phase 4)
+- **Local only — nothing pushed to remote yet**
 
-**All green:**
-- 222/222 tests pass (`pytest BD_Generation/tests/ -v`)
-- `ruff check` clean
-- `from bd_gen.model import BDDenoiser` works
-- Small config param count: ~1.28M (within 1-5M target)
-- Forward shapes verified: `(4, 8, 15)` and `(4, 28, 13)` for RPLAN
-
-**Previous phases (committed on `main`):**
-- Phase 0 (Scaffold): 54 tests, tagged `v0.1.0`
-- Phase 1 (Data Pipeline): 167 tests, merged to `main`
-
-**Data files (gitignored):**
-- `BD_Generation/data/data.mat` — 25.3 MB
-- `BD_Generation/data_cache/graph2plan_nmax8.pt` — parsed cache
+### Known issues
+- Hydra 1.3.2 is the latest available; `@hydra.main` broken on Python 3.14 (workaround in place via Compose API)
+- `implementation_state_T1.md` needs updating to mark Phase 4 as COMPLETE (user hasn't given explicit approval yet per CLAUDE.md rules)
 
 ## What remains to be done
 
-### Phase 2 wrap-up (immediate)
-1. **Run tests + ruff** to verify everything still passes (do this FIRST)
-2. **Git commit** the Phase 2 files on `model/transformer-denoiser` branch (suggested commits below)
-3. **Merge** `model/transformer-denoiser` into `main` with `--no-ff`
-4. **Tag** `v0.3.0` on main
-5. **Update `implementation_state_T1.md`** — Phase 2 summary (ONLY when user says to mark COMPLETE)
+### Immediate: GPU Training (user action required)
+1. **User sets up Google Cloud VM** (T4 or V100) — see `docs/training.md` Section 12
+2. **User had questions about Cloud VM setup** — resume this conversation thread
+3. User runs full 500-epoch training: `python scripts/train.py`
+4. User monitors via wandb, downloads `checkpoint_final.pt`
 
-**Suggested commit structure:**
-```
-feat(model): implement embedding modules (NodeEmbedding, EdgeEmbedding, CompositePositionalEncoding, TimestepEmbedding)
-feat(model): implement adaLN-Zero transformer block and MHSA
-feat(model): implement BDDenoiser top-level model
-test(model): add embedding and denoiser tests (55 tests)
-docs(model): add detailed module documentation
-```
+### Next: Phase 5 — Evaluation and Metrics
+Per `planning_T1.md` (lines 913–937), branch `eval/metrics-and-validity`:
+1. `bd_gen/eval/validity.py` — validity checker for generated graphs
+2. `bd_gen/eval/metrics.py` — validity, novelty, diversity, distribution match
+3. `scripts/evaluate.py` — generate N samples, compute all metrics, log to wandb
+4. `scripts/sample.py` — generate and save/visualise samples
+5. `bd_gen/viz/graph_viz.py` — bubble diagram visualisation
+6. Tests: `test_validity.py`, `test_metrics.py`
+7. `notebooks/04_sample_analysis.ipynb`
 
-### Phase 3 — Diffusion Core (next phase)
-6. Read spec: `planning_T1.md` sections on noise schedules, forward/reverse process
-7. Implement `bd_gen/diffusion/` — noise schedule, forward noising, ELBO loss
-
-### Phase 4-5
-8. Training loop
-9. Evaluation
+Phase 5 code can be developed on CPU with a debug checkpoint. Real evaluation needs the GPU-trained checkpoint.
 
 ## Files to reference in next session
 
-**Read first (in order):**
-1. `BD_Generation/implementation_state_T1.md` — phase tracker with rules
-2. `BD_Generation/planning_T1.md` — full implementation spec (Sections 3.2, 5.2, 6 for Phase 2)
-3. This handoff file
-
-**Phase 2 code (complete, uncommitted):**
-4. `BD_Generation/bd_gen/model/denoiser.py` — top-level BDDenoiser class
-5. `BD_Generation/bd_gen/model/embeddings.py` — 4 embedding classes
-6. `BD_Generation/bd_gen/model/transformer.py` — MHSA + AdaLNBlock
-7. `BD_Generation/bd_gen/model/__init__.py` — exports
-8. `BD_Generation/docs/model.md` — detailed architecture documentation
-
-**Phase 2 tests:**
-9. `BD_Generation/tests/test_denoiser.py` — 28 tests
-10. `BD_Generation/tests/test_embeddings.py` — 27 tests
-11. `BD_Generation/tests/conftest.py` — updated `dummy_model()` fixture + `sample_batch`
-
-**Key dependencies:**
-12. `BD_Generation/bd_gen/data/vocab.py` — VocabConfig, vocab sizes, edge_position_to_pair()
-13. `BD_Generation/configs/model/small.yaml` — d_model=128, n_layers=4, n_heads=4
-14. `BD_Generation/configs/model/base.yaml` — d_model=256, n_layers=6, n_heads=8
-
-**Reference (read-only, NOT a dependency):**
-15. `DiDAPS_COPY/backbones/dit.py` — TimestepEmbedder, DDiTBlock, DDitFinalLayer patterns
+1. `BD_Generation/implementation_state_T1.md` — dynamic state (read first per CLAUDE.md)
+2. `BD_Generation/planning_T1.md` — static spec (Phase 5 at lines 913–937)
+3. `BD_Generation/CLAUDE.md` — agent rules
+4. `BD_Generation/docs/training.md` — Phase 4 docs (Google Cloud quickstart at Section 12)
+5. `BD_Generation/scripts/train.py` — training script (Phase 5 uses same model/dataset interfaces)
+6. `BD_Generation/bd_gen/diffusion/sampling.py` — `sample()` function (Phase 5 calls this)
+7. `BD_Generation/bd_gen/data/dataset.py` — `num_rooms_distribution` attribute (needed for sampling)
 
 ## Context for the next session
 
-### Architecture facts
-- `VocabConfig(n_max=8)` → `seq_len=36` (8 nodes + 28 edges)
-- Forward pass: tokens (B,36) → split → embed separately → concat → pos enc → SiLU(timestep_emb) → N transformer blocks → final adaLN + norm → split → heads → (B,8,15) + (B,28,13)
-- Small config: ~1.28M params. Base config: ~5M params.
+### User's pending questions
+- User wanted to ask about **Cloud VM setup** before proceeding with GPU training. The session ended before those questions were discussed. Resume with those questions first.
 
-### Bug fix during implementation
-- `test_different_pad_masks_produce_different_outputs` initially failed because zero-init adaLN gates (gate=0) cause transformer blocks to contribute nothing → attention masking has no observable effect. **Fix:** randomize ALL weights to simulate a trained model, then verify mask matters. Comment in test explains this.
+### Environment facts
+- **Python 3.14.2** on Windows 11, PyTorch 2.10.0
+- **Dataset**: 80,788 graphs cached at `BD_Generation/data_cache/graph2plan_nmax8.pt` (13.5MB). All graphs have 4–8 rooms.
+- **Model sizes**: `model=small` ~1.28M params, `model=base` ~5M params. Both fit on a T4.
+- **Training estimate**: batch_size=256 on GPU → ~252 batches/epoch × 500 epochs = ~126K steps. Should take 2–4 hours on T4.
+- **wandb project**: `bd-generation`. User needs `wandb login` on the VM.
 
-### Important rules (from implementation_state_T1.md)
-- Parallelize workstreams within a phase, NOT across phases
-- Create a docs `.md` for each module
-- Only mark phase COMPLETE when user explicitly says so
-- Alert at 80% token usage for handoff
+### Gotchas
+- **Python 3.14 + Hydra**: If cloud VM has Python 3.14, the Compose API workaround in `train.py` handles it. If Python 3.12/3.13, both approaches work.
+- **No remote push yet**: All commits are local. User needs to set up a remote and `git push` before cloning on the VM.
+- **`outputs/` is gitignored**: Training outputs won't be committed.
+- **Windows `num_workers=0`**: Auto-detected in `train.py`. On Linux VMs, the default `num_workers=4` from config will be used.

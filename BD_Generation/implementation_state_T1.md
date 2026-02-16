@@ -6,8 +6,8 @@
 
 
 ## Overall Status
-- Current phase: Phase 4 (NOT STARTED)
-- Last completed: Phase 3
+- Current phase: Phase 5 (NOT STARTED)
+- Last completed: Phase 4
 - Spec corrections: vocab.py NODE_TYPES/EDGE_TYPES name-to-index mappings corrected (Phase 1 Step 0); loss_mask formula corrected (Phase 3)
 
 ## Phase 0 — Scaffold
@@ -155,7 +155,54 @@ Branch: `diffusion/noise-and-loss` → merged to `main`, tagged `v0.4.0`
 - Degenerate Gumbel test: zero-init model has near-uniform logits → tested with synthetic peaked logits instead
 
 ## Phase 4 — Training Loop
-Status: NOT STARTED
+Status: COMPLETE
+Branch: `training/basic-loop` → merged to `main`, tagged `v0.5.0`
+
+### Deliverables (all verified)
+- 309/309 tests pass (`pytest BD_Generation/tests/ -v`)
+- `ruff check` clean
+- CPU debug training: 2 epochs, loss decreased 7.41 → 6.37, checkpoints created
+- Full GPU training: 500 epochs on RTX A5000, loss ~7.4 → ~2.8, checkpoint_final.pt verified
+- Checkpoint loads on CPU, generates 4/4 unique samples with no MASK tokens
+
+### Files created/modified (7 new)
+- `bd_gen/utils/seed.py` — NEW: deterministic seeding (torch, numpy, random, CUDA)
+- `bd_gen/utils/checkpoint.py` — NEW: save/load training checkpoints with OmegaConf serialization
+- `bd_gen/utils/logging_utils.py` — NEW: wandb init, metric logging, git hash capture
+- `scripts/train.py` — NEW: full training loop (Hydra Compose API, validation, sampling, checkpointing)
+- `tests/test_integration.py` — NEW: 5 integration tests (train step, loss decrease, checkpoint roundtrip, seed, LR warmup)
+- `docs/training.md` — NEW: training documentation (~900 lines: architecture, config ref, usage, troubleshooting, GPU setup, results)
+- `notebooks/03_training_monitoring.ipynb` — NEW: wandb dashboard plotting
+
+### Key decisions
+- Hydra Compose API instead of `@hydra.main` (Python 3.14 argparse incompatibility with Hydra 1.3.2)
+- Manual output directory (`BD_Generation/outputs/<timestamp>/`) since Compose API doesn't set up Hydra cwd
+- Windows auto-detect: force `num_workers=0` on Windows (PyTorch DataLoader multiprocessing unreliable)
+- Node class weights: `None` (unweighted) in v1 — spec says optional; edge weights are the critical ones
+- Sample logging: counts only, no images — `bd_gen/viz/` doesn't exist until Phase 5
+- Loss decrease test: fixed `t=0.5` for 50 steps — random `t` causes high ELBO weight variance with 4-sample batch
+- `requires-python` lowered to `>=3.9` for university server compatibility (Python 3.9.25)
+- numpy pinned to 1.26.4 on server (wandb 0.16.6 uses removed `np.float_` from numpy 2.0)
+- wandb disabled on university server (old version rejects new 86-char API keys)
+
+### Deviations from spec
+- **Hydra Compose API**: spec assumed `@hydra.main` decorator, replaced with Compose API (`initialize_config_dir` + `compose`) due to Python 3.14 argparse incompatibility. CLI overrides still work via `sys.argv`.
+- **No resume-from-checkpoint in training script**: spec mentions checkpoint save/load but the training script does not implement automatic resume from a checkpoint. Manual resume is documented in `docs/training.md`.
+- **`noise` config key**: spec uses `schedule` as the config name (e.g. `noise=linear`), but `get_noise()` expects `config.type` attribute — the config YAML files use `type: "linear"` internally.
+- **GPU training on university server instead of Google Cloud**: Google Cloud free tier blocks GPU allocation. Training ran on Polytechnique `albatros` (RTX A5000, 24GB) with wandb disabled.
+
+### Training results (500 epochs, RTX A5000)
+- Training loss: ~7.4 (epoch 0) → ~2.8–3.2 (epoch 499), with expected ELBO weight variance
+- Validation loss: ~2.4
+- Node accuracy: ~28.9% (vs 6.7% random), Edge accuracy: ~27.5–28.4% (vs 7.7% random)
+- Wall time: ~17 minutes
+- checkpoint_final.pt: 77 parameter tensors, loads and samples correctly on CPU
+
+### Issues resolved
+- Python 3.14 + Hydra 1.3.2 argparse incompatibility → Compose API workaround
+- Server Python 3.9 → `from __future__ import annotations` in `test_tokenizer.py`, ruff target `py39`
+- numpy 2.0 breaks wandb 0.16.6 → pinned numpy==1.26.4 on server
+- wandb API key format mismatch → `wandb.mode=disabled`
 
 ## Phase 5 — Evaluation
 Status: NOT STARTED

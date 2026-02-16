@@ -21,7 +21,8 @@ training loop.
 9. [Learning Rate Schedule](#9-learning-rate-schedule)
 10. [Per-Class Accuracy](#10-per-class-accuracy)
 11. [Troubleshooting](#11-troubleshooting)
-12. [Google Cloud GPU Quickstart](#12-google-cloud-gpu-quickstart)
+12. [GPU Training Setup](#12-gpu-training-setup)
+13. [Training Results](#13-training-results)
 
 ---
 
@@ -713,21 +714,33 @@ python scripts/prepare_data.py
 
 Downloads and caches the Graph2Plan dataset (~80K samples).
 
-#### Step 5: Login to wandb
+#### Step 5: wandb (currently broken on this server)
+
+wandb on the Polytechnique server uses an old version that rejects
+the new 86-character API keys. Skip wandb for now:
 
 ```bash
-wandb login
-# Paste your API key
+# wandb login does NOT work — API key format mismatch
+# Use disabled mode instead:
+python scripts/train.py wandb.mode=disabled
 ```
 
-#### Step 6: Train
+Training still prints progress to the terminal. Checkpoints are
+saved regardless of wandb.
+
+#### Step 6: Train (inside tmux)
+
+Use tmux so training survives SSH disconnects:
 
 ```bash
-python scripts/train.py
+tmux new -s train
+cd /Data/amine.chraibi/Davis
+source .venv/bin/activate
+cd BD_Generation
+python scripts/train.py wandb.mode=disabled
 ```
 
-Uses all defaults: 500 epochs, batch_size=256, model=small, noise=linear.
-Monitor progress at [wandb.ai](https://wandb.ai) in real-time.
+To detach: `Ctrl+B`, then `D`.  To reattach: `tmux attach -t train`.
 
 #### Step 7: Copy Checkpoints Locally
 
@@ -825,3 +838,86 @@ Total budget for multiple experimental runs: **under $5**.
   ```bash
   gcloud compute scp bd-gen-training:~/Davis/BD_Generation/outputs/*/checkpoints/checkpoint_final.pt ./
   ```
+
+---
+
+## 13. Training Results
+
+### First Full Training Run
+
+Trained on the Polytechnique `albatros` server (NVIDIA RTX A5000, 24 GB
+VRAM) with the default `model=small` configuration and
+`wandb.mode=disabled`.
+
+| Setting | Value |
+|---------|-------|
+| GPU | RTX A5000 (24 GB) |
+| Model | `small` (d_model=128, 4 layers, 4 heads, ~1.28M params) |
+| Batch size | 256 |
+| Epochs | 500 |
+| Noise schedule | Linear (sigma_min=0, sigma_max=10) |
+| Optimizer | AdamW (lr=3e-4, weight_decay=0.01) |
+| Warmup | 1000 steps |
+| Total steps | 126,000 |
+| Wall time | ~17 minutes |
+| Python | 3.9.25 (server) |
+| PyTorch | 2.5.1+cu121 |
+
+### Final Metrics
+
+| Metric | Value |
+|--------|-------|
+| Training loss (final epochs) | ~2.8–3.2 |
+| Validation loss | ~2.4 |
+| Node accuracy | ~28.9% (random chance: 6.7%) |
+| Edge accuracy | ~27.5–28.4% (random chance: 7.7%) |
+
+### Why Training Loss Does Not Decrease Monotonically
+
+The per-epoch training loss fluctuates noticeably (e.g. 2.95 → 3.10 →
+3.41 → 7.02 → 2.80 across epochs 495–499).  This is expected in MDLM
+training and does **not** indicate a problem.  Three factors cause it:
+
+1. **Random timestep sampling.**  Each batch draws `t ~ Uniform(0, 1)`
+   independently.  The difficulty of predicting masked tokens varies
+   dramatically with `t`: at large `t` most tokens are masked (hard),
+   while at small `t` very few are masked (easy but heavily weighted).
+   Different epoch averages see different timestep distributions.
+
+2. **ELBO weight variance.**  The loss weight `w(t) = 1 / (1 - α_t)`
+   diverges as `t → 0` (clamped at 1000 in our implementation).  A
+   single batch that happens to draw several `t` values close to 0
+   contributes a disproportionately large loss, spiking the epoch
+   average.  The epoch-498 spike to 7.0 is a textbook example of this.
+
+3. **Stochastic masking.**  Even at the same `t`, the *which* tokens are
+   masked is random (each position is masked independently with
+   probability `1 - α_t`).  This adds another layer of variance to the
+   per-batch loss.
+
+**The validation loss (~2.4) is a more stable measure** because it
+averages over more batches without gradient updates.  The long-term
+trend from ~7.4 (epoch 0) to ~2.8 (epoch 499) shows clear convergence.
+
+### Sample Quality (Qualitative)
+
+After 500 epochs, deterministic sampling (`temperature=0.0`, 50 steps)
+produces:
+- **No MASK tokens** in output (sampling clean-up works correctly)
+- **4/4 unique samples** in a test batch (no mode collapse)
+- **Diverse room types**: LivingRoom, MasterRoom, Kitchen, Bathroom,
+  SecondRoom, Balcony all appear in generated samples
+- **Varying room counts** (3–7 rooms per graph, matching the training
+  distribution)
+- **PAD tokens** in correct positions
+
+Quantitative evaluation (validity, novelty, diversity) is deferred to
+Phase 5.
+
+### Server-Specific Issues
+
+| Issue | Resolution |
+|-------|------------|
+| wandb 0.16.6 rejects new 86-char API keys | Used `wandb.mode=disabled` |
+| numpy 2.0 removed `np.float_` (used by old wandb) | Pinned numpy==1.26.4 on server |
+| Server Python 3.9 vs local Python 3.14 | Lowered `requires-python` to `>=3.9`, added `from __future__ import annotations` where needed |
