@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "bd-gen"
 version = "0.1.0"
 description = "MDLM-based bubble diagram generator for residential floorplans"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
     "torch>=2.1.0",
     "scipy>=1.11.0",
@@ -38,7 +38,7 @@ python_functions = "test_*"
 
 [tool.ruff]
 line-length = 88
-target-version = "py310"
+target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]

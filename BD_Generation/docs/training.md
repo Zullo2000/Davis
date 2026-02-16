@@ -638,45 +638,73 @@ architecture was used.
 
 ---
 
-## 12. Google Cloud GPU Quickstart
+## 12. GPU Training Setup
 
-This section provides step-by-step instructions for running the full
-500-epoch training on a Google Cloud VM with a GPU.
+Two options for running the full 500-epoch training on a GPU.
 
-### Prerequisites
+---
 
-- Google Cloud account with billing enabled
-- `gcloud` CLI installed locally
-- SSH key configured
+### Option A: University SSH Server (Polytechnique)
 
-### Step 1: Create a VM
+#### Prerequisites
 
-```bash
-gcloud compute instances create bd-gen-training \
-    --zone=us-central1-a \
-    --machine-type=n1-standard-4 \
-    --accelerator=type=nvidia-tesla-t4,count=1 \
-    --image-family=pytorch-latest-gpu \
-    --image-project=deeplearning-platform-release \
-    --boot-disk-size=50GB \
-    --preemptible
+- SSH access to `albatros.polytechnique.fr`
+- VSCode with Remote-SSH extension
+
+#### Step 1: SSH Config (local machine)
+
+Add this to `~/.ssh/config`:
+
+```
+Host albatros
+  HostName albatros.polytechnique.fr
+  User amine.chraibi
+  PreferredAuthentications password
+  PubkeyAuthentication no
 ```
 
-Use `--preemptible` (spot) for ~70% cost savings.  A T4 is sufficient
-for the 1–5M parameter model with 36-token sequences.
+#### Step 2: Connect via VSCode
 
-### Step 2: SSH and Setup
+1. Press `Ctrl+Shift+P` → **Remote-SSH: Connect to Host**
+2. Select **albatros** from the list
+3. Enter password when prompted
+
+VSCode opens a remote window — terminal, files, and extensions all
+run on the server.
+
+#### Step 3: Activate the Environment
+
+Everything is already installed at `/Data/amine.chraibi/Davis`.
+No need to clone or run `pip install` (which takes very long).
 
 ```bash
-gcloud compute ssh bd-gen-training --zone=us-central1-a
+cd /Data/amine.chraibi/Davis
+source .venv/bin/activate
+```
 
-# On the VM:
-git clone <your-repo-url> Davis
+To update the code after local changes (push from local first):
+```bash
+git pull origin main
+```
+
+#### Step 3b: Fresh Install (only if starting from scratch)
+
+If the environment at `/Data/amine.chraibi/Davis` is missing or
+broken, reinstall from scratch:
+
+```bash
+git clone https://github.com/Zullo2000/Davis.git
 cd Davis
+python3 -m venv .venv
+source .venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cu121
 pip install -e "BD_Generation/[dev]"
 ```
 
-### Step 3: Prepare Data
+Note: the repo must be temporarily public for `git clone` to work,
+or use a personal access token.
+
+#### Step 4: Prepare Data
 
 ```bash
 cd BD_Generation
@@ -685,14 +713,14 @@ python scripts/prepare_data.py
 
 Downloads and caches the Graph2Plan dataset (~80K samples).
 
-### Step 4: Login to wandb
+#### Step 5: Login to wandb
 
 ```bash
 wandb login
 # Paste your API key
 ```
 
-### Step 5: Train
+#### Step 6: Train
 
 ```bash
 python scripts/train.py
@@ -701,19 +729,83 @@ python scripts/train.py
 Uses all defaults: 500 epochs, batch_size=256, model=small, noise=linear.
 Monitor progress at [wandb.ai](https://wandb.ai) in real-time.
 
-### Step 6: Stop the VM
+#### Step 7: Copy Checkpoints Locally
 
 ```bash
 # From your local machine:
-gcloud compute instances stop bd-gen-training --zone=us-central1-a
+scp albatros:~/Davis/BD_Generation/outputs/*/checkpoints/checkpoint_final.pt ./
+```
+
+---
+
+### Option B: Google Cloud VM
+
+#### Prerequisites
+
+- Google Cloud account with billing enabled (full account, not free tier)
+- `gcloud` CLI installed locally (`gcloud init` to configure)
+
+#### Step 1: Create a VM
+
+```bash
+gcloud compute instances create bd-gen-training \
+    --zone=europe-west1-b \
+    --machine-type=n1-standard-4 \
+    --accelerator=type=nvidia-tesla-t4,count=1 \
+    --image-family=pytorch-2-7-cu128-ubuntu-2404-nvidia-570 \
+    --image-project=deeplearning-platform-release \
+    --boot-disk-size=100GB \
+    --preemptible
+```
+
+Use `--preemptible` (spot) for ~70% cost savings.  A T4 is sufficient
+for the 1–5M parameter model with 36-token sequences.
+
+#### Step 2: SSH and Setup
+
+```bash
+gcloud compute ssh bd-gen-training --zone=europe-west1-b
+
+# On the VM:
+git clone <your-repo-url> Davis
+cd Davis
+pip install -e "BD_Generation/[dev]"
+```
+
+#### Step 3: Prepare Data
+
+```bash
+cd BD_Generation
+python scripts/prepare_data.py
+```
+
+#### Step 4: Login to wandb
+
+```bash
+wandb login
+```
+
+#### Step 5: Train
+
+```bash
+python scripts/train.py
+```
+
+Monitor progress at [wandb.ai](https://wandb.ai) in real-time.
+
+#### Step 6: Stop the VM
+
+```bash
+# From your local machine:
+gcloud compute instances stop bd-gen-training --zone=europe-west1-b
 ```
 
 Or delete it:
 ```bash
-gcloud compute instances delete bd-gen-training --zone=us-central1-a
+gcloud compute instances delete bd-gen-training --zone=europe-west1-b
 ```
 
-### Cost Estimate
+#### Cost Estimate
 
 | GPU | Spot $/hr | Full training (~3h) |
 |-----|-----------|---------------------|
@@ -722,7 +814,7 @@ gcloud compute instances delete bd-gen-training --zone=us-central1-a
 
 Total budget for multiple experimental runs: **under $5**.
 
-### Tips
+#### Tips
 
 - **Checkpointing:** Checkpoints are saved every 50 epochs.  If the
   spot VM is preempted, you can resume from the latest checkpoint.

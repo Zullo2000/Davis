@@ -4,6 +4,8 @@ Covers tokenize/detokenize correctness, round-trip identity, and the
 critical PAD-vs-no-edge invariant across all supported graph sizes.
 """
 
+from __future__ import annotations
+
 import pytest
 import torch
 
