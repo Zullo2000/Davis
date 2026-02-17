@@ -303,3 +303,27 @@ Reference: Zheng et al., "Masked Diffusion Models are Secretly Time-Agnostic Mas
 - `.float()` cast after float64 arithmetic — downstream comparisons (rand, clamp) expect float32
 - Model forward pass untouched — stays entirely float32
 - Gumbel sampling already used float64 (unchanged)
+
+## Pre-Retrain Adjustments
+Status: COMPLETE
+
+### Summary
+Two changes before retraining with the post-v1 fixes (SUBS zero masking, float64, safe CE targets).
+
+### 1. Importance sampling enabled
+Changed `training.importance_sampling` from `false` to `true` in `configs/training/default.yaml`.
+
+**What it does:** Instead of sampling timesteps `t ~ Uniform(0,1)` during training, maps uniform samples through a CDF derived from the noise schedule's sigma function. This concentrates more timesteps where the ELBO weight `w(t) = -alpha'(t)/(1-alpha(t))` has high variance (near `t → 0`), reducing gradient noise without bias.
+
+**Reference:** Sahoo et al., "Simple and Effective Masked Diffusion Language Models" (MDLM), Section 3.2. Implementation: `NoiseSchedule.importance_sampling_transformation()` in `noise_schedule.py` (lines 85-100), wired in `train.py` (lines 314-315). The sigma_min=0 singularity is already handled (clamped to 1e-4).
+
+**Why now:** The v1 training used uniform sampling to establish a baseline. With float64 `w(t)` precision now in place, importance sampling can safely operate in the regime near `t → 0` without numerical issues.
+
+### 2. Gradient finiteness assertion added
+Added `torch.isfinite(param.grad).all()` assertion to `test_full_train_step` in `tests/test_integration.py`. Documents the invariant that the -inf logit safety chain (SUBS zero masking + safe CE targets + loss_mask) produces finite gradients through the full training pipeline.
+
+### No other training changes
+- LR schedule: unchanged (linear warmup 1000 steps → constant 3e-4)
+- EMA: unchanged (disabled, deferred per spec)
+- Model architecture: unchanged
+- Optimizer: unchanged (AdamW, weight_decay=0.01, grad_clip=1.0)

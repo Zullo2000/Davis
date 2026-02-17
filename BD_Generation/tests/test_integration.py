@@ -64,10 +64,15 @@ def test_full_train_step(sample_batch, dummy_model, linear_schedule):
     loss.backward()
     optimizer.step()
 
-    # Verify gradients flowed to all trainable parameters
+    # Verify gradients flowed to all trainable parameters and are finite.
+    # The finiteness check documents the invariant that SUBS zero masking
+    # (-inf logits for MASK/PAD) + safe CE targets + loss_mask produce
+    # well-defined gradients through the full training pipeline.
     for name, param in model.named_parameters():
         if param.requires_grad:
             assert param.grad is not None, f"No gradient for {name}"
+            assert torch.isfinite(param.grad).all(), \
+                f"Non-finite gradient for {name}"
 
 
 # -------------------------------------------------------------------
