@@ -36,10 +36,14 @@ from bd_gen.data.vocab import NODE_PAD_IDX, VocabConfig  # noqa: E402
 from bd_gen.diffusion.noise_schedule import get_noise  # noqa: E402
 from bd_gen.diffusion.sampling import sample  # noqa: E402
 from bd_gen.eval.metrics import (  # noqa: E402
+    conditional_edge_kl,
     distribution_match,
     diversity,
     graph_structure_mmd,
+    mode_coverage,
     novelty,
+    spatial_transitivity,
+    type_conditioned_degree_kl,
     validity_rate,
 )
 from bd_gen.eval.validity import check_validity_batch  # noqa: E402
@@ -223,6 +227,18 @@ def evaluate(cfg: DictConfig) -> None:
             dm["node_kl"], dm["edge_kl"], dm["num_rooms_kl"],
         )
 
+    if "conditional_edge_kl" in requested:
+        cekl = conditional_edge_kl(graph_dicts, train_dicts)
+        metrics_dict["eval/conditional_edge_kl_mean"] = cekl["conditional_edge_kl_mean"]
+        metrics_dict["eval/conditional_edge_kl_weighted"] = cekl["conditional_edge_kl_weighted"]
+        metrics_dict["eval/conditional_edge_kl_npairs"] = cekl["num_pairs_evaluated"]
+        logger.info(
+            "Conditional edge KL — mean=%.4f, weighted=%.4f, pairs=%d",
+            cekl["conditional_edge_kl_mean"],
+            cekl["conditional_edge_kl_weighted"],
+            int(cekl["num_pairs_evaluated"]),
+        )
+
     if "graph_structure_mmd" in requested:
         mmd = graph_structure_mmd(
             graph_dicts, train_dicts, n_max=cfg.data.n_max,
@@ -232,6 +248,47 @@ def evaluate(cfg: DictConfig) -> None:
         logger.info(
             "Structure MMD — degree=%.6f, clustering=%.6f, spectral=%.6f",
             mmd["mmd_degree"], mmd["mmd_clustering"], mmd["mmd_spectral"],
+        )
+
+    if "spatial_transitivity" in requested:
+        st = spatial_transitivity(graph_dicts)
+        metrics_dict["eval/transitivity_score"] = st["transitivity_score"]
+        metrics_dict["eval/h_consistent"] = st["h_consistent"]
+        metrics_dict["eval/v_consistent"] = st["v_consistent"]
+        logger.info(
+            "Spatial transitivity — overall=%.1f%%, h=%.1f%%, v=%.1f%%",
+            100 * st["transitivity_score"],
+            100 * st["h_consistent"],
+            100 * st["v_consistent"],
+        )
+
+    if "type_conditioned_degree_kl" in requested:
+        tcdkl = type_conditioned_degree_kl(
+            graph_dicts, train_dicts, n_max=cfg.data.n_max,
+        )
+        metrics_dict["eval/degree_kl_per_type_mean"] = tcdkl["degree_kl_per_type_mean"]
+        metrics_dict["eval/degree_kl_per_type_weighted"] = tcdkl["degree_kl_per_type_weighted"]
+        metrics_dict["eval/degree_kl_num_types"] = tcdkl["num_types_evaluated"]
+        logger.info(
+            "Type-conditioned degree KL — mean=%.4f, weighted=%.4f, types=%d",
+            tcdkl["degree_kl_per_type_mean"],
+            tcdkl["degree_kl_per_type_weighted"],
+            int(tcdkl["num_types_evaluated"]),
+        )
+
+    if "mode_coverage" in requested:
+        mc = mode_coverage(graph_dicts, train_dicts)
+        metrics_dict["eval/mode_coverage"] = mc["mode_coverage"]
+        metrics_dict["eval/mode_coverage_weighted"] = mc["mode_coverage_weighted"]
+        metrics_dict["eval/num_training_modes"] = mc["num_training_modes"]
+        metrics_dict["eval/num_sample_modes"] = mc["num_sample_modes"]
+        logger.info(
+            "Mode coverage — unweighted=%.1f%%, weighted=%.1f%% "
+            "(%d/%d training modes covered)",
+            100 * mc["mode_coverage"],
+            100 * mc["mode_coverage_weighted"],
+            int(mc["mode_coverage"] * mc["num_training_modes"]),
+            int(mc["num_training_modes"]),
         )
 
     # --- Detailed validity breakdown ---

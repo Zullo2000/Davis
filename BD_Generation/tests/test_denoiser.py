@@ -10,7 +10,11 @@ import torch
 import torch.nn as nn
 
 from bd_gen.data.vocab import (
+    EDGE_MASK_IDX,
+    EDGE_PAD_IDX,
     EDGE_VOCAB_SIZE,
+    NODE_MASK_IDX,
+    NODE_PAD_IDX,
     NODE_VOCAB_SIZE,
     RESPLAN_VOCAB_CONFIG,
     VocabConfig,
@@ -251,22 +255,25 @@ class TestAdaLNZeroInit:
             ), f"{head_name} bias not zero"
 
     def test_initial_output_near_zero(self, small_model, sample_batch):
-        """At initialization, all outputs should be near zero (uniform logits).
+        """At initialization, real-class logits should be near zero (uniform).
 
         With zero-init heads and zero-init final adaLN, the model initially
-        produces all-zero logits, corresponding to a uniform distribution
-        over classes.
+        produces all-zero logits for real classes, corresponding to a uniform
+        distribution. MASK/PAD logits are -inf (zero masking probabilities).
         """
         model = small_model
         model.eval()
         node_logits, edge_logits = model(
             sample_batch["tokens"], sample_batch["pad_mask"], t=0.5
         )
-        assert node_logits.abs().max() < 1e-4, (
-            f"Initial node logits too large: max abs = {node_logits.abs().max()}"
+        # Check only real-class logits (MASK/PAD are intentionally -inf)
+        assert node_logits[:, :, :NODE_MASK_IDX].abs().max() < 1e-4, (
+            f"Initial node logits too large: max abs = "
+            f"{node_logits[:, :, :NODE_MASK_IDX].abs().max()}"
         )
-        assert edge_logits.abs().max() < 1e-4, (
-            f"Initial edge logits too large: max abs = {edge_logits.abs().max()}"
+        assert edge_logits[:, :, :EDGE_MASK_IDX].abs().max() < 1e-4, (
+            f"Initial edge logits too large: max abs = "
+            f"{edge_logits[:, :, :EDGE_MASK_IDX].abs().max()}"
         )
 
 
@@ -367,8 +374,9 @@ class TestPadMaskPropagation:
 
         node_logits, edge_logits = model(tokens, pad_mask, t=0.5)
 
-        assert torch.isfinite(node_logits).all()
-        assert torch.isfinite(edge_logits).all()
+        # Real-class logits should be finite (MASK/PAD logits are -inf by design)
+        assert torch.isfinite(node_logits[:, :, :NODE_MASK_IDX]).all()
+        assert torch.isfinite(edge_logits[:, :, :EDGE_MASK_IDX]).all()
 
 
 # ---------------------------------------------------------------------------
@@ -421,9 +429,10 @@ class TestTimestepVariation:
         # But we test the infrastructure: _process_t handles different t values
         # and they flow through to the conditioning.
         # (After training, outputs would differ significantly.)
-        # Just verify no crash and output is valid.
-        assert torch.isfinite(node_logits1).all()
-        assert torch.isfinite(node_logits2).all()
+        # Just verify no crash and real-class logits are valid.
+        # (MASK/PAD logits are -inf by design.)
+        assert torch.isfinite(node_logits1[:, :, :NODE_MASK_IDX]).all()
+        assert torch.isfinite(node_logits2[:, :, :NODE_MASK_IDX]).all()
 
     def test_batched_timesteps(self, small_model, sample_batch):
         """Per-sample timesteps should work."""
@@ -439,3 +448,56 @@ class TestTimestepVariation:
 
         assert node_logits.shape == (B, 8, NODE_VOCAB_SIZE)
         assert edge_logits.shape == (B, 28, EDGE_VOCAB_SIZE)
+
+
+# ---------------------------------------------------------------------------
+# SUBS zero masking probabilities
+# ---------------------------------------------------------------------------
+
+
+class TestZeroMaskingProbabilities:
+    """Verify that MASK and PAD logits are clamped to -inf after forward()."""
+
+    def test_node_mask_logit_is_neg_inf(self, small_model, sample_batch):
+        model = small_model
+        model.eval()
+        node_logits, _ = model(
+            sample_batch["tokens"], sample_batch["pad_mask"], t=0.5
+        )
+        assert (node_logits[:, :, NODE_MASK_IDX] == float('-inf')).all()
+
+    def test_node_pad_logit_is_neg_inf(self, small_model, sample_batch):
+        model = small_model
+        model.eval()
+        node_logits, _ = model(
+            sample_batch["tokens"], sample_batch["pad_mask"], t=0.5
+        )
+        assert (node_logits[:, :, NODE_PAD_IDX] == float('-inf')).all()
+
+    def test_edge_mask_logit_is_neg_inf(self, small_model, sample_batch):
+        model = small_model
+        model.eval()
+        _, edge_logits = model(
+            sample_batch["tokens"], sample_batch["pad_mask"], t=0.5
+        )
+        assert (edge_logits[:, :, EDGE_MASK_IDX] == float('-inf')).all()
+
+    def test_edge_pad_logit_is_neg_inf(self, small_model, sample_batch):
+        model = small_model
+        model.eval()
+        _, edge_logits = model(
+            sample_batch["tokens"], sample_batch["pad_mask"], t=0.5
+        )
+        assert (edge_logits[:, :, EDGE_PAD_IDX] == float('-inf')).all()
+
+    def test_real_token_logits_are_finite(self, small_model, sample_batch):
+        """Non-special logits should remain finite (not clamped)."""
+        model = small_model
+        model.eval()
+        node_logits, edge_logits = model(
+            sample_batch["tokens"], sample_batch["pad_mask"], t=0.5
+        )
+        # Node real classes: 0-12
+        assert torch.isfinite(node_logits[:, :, :NODE_MASK_IDX]).all()
+        # Edge real classes: 0-10
+        assert torch.isfinite(edge_logits[:, :, :EDGE_MASK_IDX]).all()

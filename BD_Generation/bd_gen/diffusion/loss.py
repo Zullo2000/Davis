@@ -81,13 +81,15 @@ class ELBOLoss(nn.Module):
             (B,) float32 ELBO weights.
         """
         t_clamped = torch.clamp(t, min=self.t_min, max=1.0)
-        alpha_t = noise_schedule.alpha(t_clamped)
-        alpha_prime_t = noise_schedule.alpha_prime(t_clamped)
+        # Float64 for precision near t→0 where 1-alpha(t) is tiny.
+        # See Zheng et al. (arXiv:2409.02908).
+        alpha_t = noise_schedule.alpha(t_clamped.double())          # float64
+        alpha_prime_t = noise_schedule.alpha_prime(t_clamped).double()
 
         denominator = 1.0 - alpha_t + self.eps
         w = -alpha_prime_t / denominator
 
-        return torch.clamp(w, max=1000.0)
+        return torch.clamp(w, max=1000.0).float()
 
     def forward(
         self,
@@ -136,16 +138,23 @@ class ELBOLoss(nn.Module):
         # Reshape to (B*L, V) for F.cross_entropy, then back to (B, L)
         B = node_logits.shape[0]
 
+        # Clamp targets at non-loss positions to class 0 so CE never indexes
+        # into -inf logits (MASK/PAD indices are clamped to -inf by the
+        # denoiser's zero masking probabilities). The loss_mask zeros out
+        # these positions anyway, so the target value is irrelevant.
+        safe_node_x0 = torch.where(node_loss_mask, node_x0, torch.zeros_like(node_x0))
+        safe_edge_x0 = torch.where(edge_loss_mask, edge_x0, torch.zeros_like(edge_x0))
+
         node_ce = F.cross_entropy(
             node_logits.reshape(-1, NODE_VOCAB_SIZE),
-            node_x0.reshape(-1),
+            safe_node_x0.reshape(-1),
             weight=self.node_class_weights,
             reduction="none",
         ).reshape(B, -1)  # (B, n_max)
 
         edge_ce = F.cross_entropy(
             edge_logits.reshape(-1, EDGE_VOCAB_SIZE),
-            edge_x0.reshape(-1),
+            safe_edge_x0.reshape(-1),
             weight=self.edge_class_weights,
             reduction="none",
         ).reshape(B, -1)  # (B, n_edges)

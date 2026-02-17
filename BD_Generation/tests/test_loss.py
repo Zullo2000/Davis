@@ -252,6 +252,19 @@ class TestELBOWeight:
         w = elbo_loss._compute_w(t, linear_schedule)
         assert (w <= 1000.0).all()
 
+    def test_w_t_float64_precision_near_zero(self, elbo_loss, linear_schedule):
+        """w(t) near t_min benefits from float64; output is float32.
+
+        At t=1e-5: alpha ≈ 0.9999, denominator 1-alpha ≈ 1e-4. Float64
+        gives more accurate intermediate values. See arXiv:2409.02908.
+        """
+        t = torch.tensor([1e-5, 1e-4, 1e-3, 0.01, 0.1, 0.5, 1.0])
+        w = elbo_loss._compute_w(t, linear_schedule)
+        assert torch.isfinite(w).all()
+        assert (w > 0).all()
+        # Output must be float32 (cast back from float64 internal)
+        assert w.dtype == torch.float32
+
 
 # =========================================================================
 # Loss Decreases

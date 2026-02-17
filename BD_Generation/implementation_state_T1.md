@@ -6,8 +6,9 @@
 
 
 ## Overall Status
-- Current phase: All phases complete (v1 pipeline)
+- Current phase: All phases complete (v1 pipeline) + post-v1 enhancements
 - Last completed: Phase 5
+- Post-v1: Confidence-based unmasking mode added to sampling (BichraiX); SUBS zero masking probabilities added to denoiser; float64 numerical stability fix (arXiv:2409.02908)
 - Spec corrections: vocab.py NODE_TYPES/EDGE_TYPES name-to-index mappings corrected (Phase 1 Step 0); loss_mask formula corrected (Phase 3)
 
 ## Phase 0 — Scaffold
@@ -238,3 +239,67 @@ Branch: `eval/metrics-and-validity` → merged to `main`
 ### Deviations from spec
 - Added `vocab_config` parameter to `check_validity` (spec signature omitted it)
 - `novelty` uses hash-based exact match instead of GED (practical constraint)
+
+## Post-v1 — Confidence-Based Unmasking
+Status: COMPLETE
+Commit: `499a588` (BichraiX, 2026-02-17)
+
+### Summary
+Added an `unmasking_mode` parameter to `sample()` in `bd_gen/diffusion/sampling.py`. The original MDLM sampling uses random coin-flips to decide which MASK positions to unmask at each step. The new `"confidence"` mode (inspired by LLaDA — Nie et al.) instead unmasks positions where the model is most confident first, deferring ambiguous positions to later steps when more context is available.
+
+### Motivation
+Random unmasking treats all positions equally regardless of model certainty. This can cause the model to commit early to low-confidence predictions (e.g., ambiguous edge types between distant rooms) that propagate errors to subsequent steps. Confidence-based unmasking lets the model resolve easy, structural decisions first — obvious room types, dominant spatial relationships — and tackle harder predictions later with richer context. This ordering has been shown to improve sample quality in masked diffusion models (LLaDA, MDLM++ variants).
+
+### Files modified (2)
+- `bd_gen/diffusion/sampling.py` — added `unmasking_mode` param (`"random"` | `"confidence"`), restructured step 4d–4f
+- `tests/test_sampling.py` — added tests for confidence mode
+
+### Key design decisions
+- Default `"random"` preserves full backward compatibility
+- Token prediction moved before unmasking decision (confidence mode needs predicted probabilities)
+- Budget per step: `p_unmask × num_remaining_masked` positions, selected by top-k confidence
+- Final step (`i == 0`): unmasks all remaining positions regardless of confidence
+- Per-sample top-k loop (has a `TODO` for vectorization at scale)
+
+## Post-v1 — SUBS Zero Masking Probabilities
+Status: COMPLETE
+
+### Summary
+Added the MDLM SUBS "zero masking probabilities" hard constraint to `BDDenoiser.forward()`. MASK and PAD logits are now clamped to `−∞` before the model returns, so `softmax` assigns them exactly zero probability. This makes an implicit guarantee (no training signal to predict MASK) into an explicit architectural constraint that applies to both training and inference.
+
+### Files modified (4)
+- `bd_gen/model/denoiser.py` — imported `NODE_MASK_IDX`, `NODE_PAD_IDX`, `EDGE_MASK_IDX`, `EDGE_PAD_IDX` from vocab; added step 11 clamping MASK+PAD logits to `−∞` at end of `forward()`
+- `tests/test_denoiser.py` — added `TestZeroMaskingProbabilities` class with 5 tests (MASK/PAD logits are `−inf` for both node and edge; real-token logits remain finite)
+- `bd_gen/diffusion/sampling.py` — updated Step 5 comment to note this cleanup is now a safety net (expected no-op given the architectural constraint)
+- `docs/mdlm_comparison.md` — updated section 2.2 ("both implemented") and summary table row for SUBS zero masking probs
+
+### Key design decisions
+- Clamp both MASK and PAD logits (PAD should also never be predicted for real positions)
+- Clamp in model `forward()`, not in sampling (architectural constraint > post-hoc fix)
+- Keep sampling final cleanup as defense-in-depth safety net (costs nothing)
+- Existing checkpoint (`checkpoint_final.pt`) loads unchanged — architecture is the same, only forward-pass behavior changes
+
+## Post-v1 — Float64 Numerical Stability (arXiv:2409.02908)
+Status: COMPLETE
+
+### Summary
+Fixed catastrophic cancellation in MDLM transition probability computation. The sampling formula `p_unmask = (α(t_next) − α(t_now)) / (1 − α(t_now))` loses precision in float32 when `α(t_next) ≈ α(t_now)` (high num_steps). Fix: pass `t.double()` to existing `alpha()` — PyTorch auto-promotes float32 buffers + float64 input to float64 output.
+
+Reference: Zheng et al., "Masked Diffusion Models are Secretly Time-Agnostic Masked Models and Exploit Inaccurate Categorical Sampling" (arXiv:2409.02908).
+
+### Inference vs training
+- **`sampling.py` (inference)**: p_unmask computed in float64. Testable immediately with any existing checkpoint.
+- **`loss.py` (training)**: w(t) ELBO weight computed in float64. Only benefits future training runs.
+
+### Files modified (4)
+- `bd_gen/diffusion/sampling.py` — `p_unmask` computed via `alpha(t.double())` instead of `alpha(t)` (float32)
+- `bd_gen/diffusion/loss.py` — `_compute_w` uses `alpha(t.double())` and `alpha_prime().double()` for denominator precision
+- `tests/test_sampling.py` — added `TestFloat64Precision` class (3 tests: accuracy at N=10000, nonzero at N=50000, entropy preservation)
+- `tests/test_loss.py` — added `test_w_t_float64_precision_near_zero` to `TestELBOWeight`
+- `docs/diffusion.md` — updated Numerical Stability table, added "Float64 Precision for Transition Probabilities" subsection
+
+### Key design decisions
+- No new methods on NoiseSchedule — `alpha(t.double())` leverages PyTorch auto-promotion
+- `.float()` cast after float64 arithmetic — downstream comparisons (rand, clamp) expect float32
+- Model forward pass untouched — stays entirely float32
+- Gumbel sampling already used float64 (unchanged)

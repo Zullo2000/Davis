@@ -184,14 +184,16 @@ def sample(
                 (node_logits, edge_logits), x_t, t_now, pad_mask
             )
 
-        # 4c. Compute unmasking probability
-        alpha_now = noise_schedule.alpha(t_tensor)  # (B,)
-        alpha_next = noise_schedule.alpha(
-            torch.full_like(t_tensor, t_next)
-        )  # (B,)
-        p_unmask = (alpha_next - alpha_now) / (1.0 - alpha_now + 1e-8)
-        p_unmask = torch.clamp(p_unmask, min=0.0, max=1.0)
-        p_unmask = p_unmask.unsqueeze(1)  # (B, 1) for broadcasting
+        # 4c. Compute unmasking probability in float64 to prevent
+        # catastrophic cancellation when alpha values are close
+        # (high num_steps). See Zheng et al. (arXiv:2409.02908).
+        alpha_now_64 = noise_schedule.alpha(t_tensor.double())  # (B,) float64
+        alpha_next_64 = noise_schedule.alpha(
+            torch.full((batch_size,), t_next, dtype=torch.float64, device=device)
+        )  # (B,) float64
+        p_unmask = (alpha_next_64 - alpha_now_64) / (1.0 - alpha_now_64 + 1e-8)
+        p_unmask = torch.clamp(p_unmask, min=0.0, max=1.0).float()
+        p_unmask = p_unmask.unsqueeze(1)  # (B, 1)
 
         # 4d. Choose predicted tokens (needed before unmasking decision
         #     for confidence mode)
@@ -271,7 +273,11 @@ def sample(
         if remasking_fn is not None:
             x_t = remasking_fn(x_t, t_next)
 
-    # --- Step 5: Final cleanup ---
+    # --- Step 5: Final cleanup (safety net) ---
+    # With SUBS zero masking probabilities enforced in the denoiser (MASK/PAD
+    # logits clamped to -inf), this step should be a no-op in practice.
+    # Kept as defense-in-depth for edge cases (e.g., guidance_fn or
+    # remasking_fn introducing MASK tokens after the last denoising step).
     # Any remaining MASK tokens -> predict at t ~ 0
     remaining_node_mask = x_t[:, :n_max] == NODE_MASK_IDX
     remaining_edge_mask = x_t[:, n_max:] == EDGE_MASK_IDX

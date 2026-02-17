@@ -114,9 +114,11 @@ def draw_bubble_diagram(
     # Node colors
     node_colors = [ROOM_COLORS.get(node_types[k], "#CCCCCC") for k in range(num_rooms)]
 
-    # Node labels (short names)
+    # Node labels: "i:Type" so edge directionality is readable.
+    # For any edge label, the lower-index node is the subject:
+    # "node i is [label] relative to node j" where i < j.
     labels = {
-        k: _SHORT_LABELS.get(node_types[k], str(node_types[k]))
+        k: f"{k}:{_SHORT_LABELS.get(node_types[k], str(node_types[k]))}"
         for k in range(num_rooms)
     }
 

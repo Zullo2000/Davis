@@ -60,11 +60,12 @@ def init_wandb(config: DictConfig) -> None:
     )
 
 
-def log_metrics(metrics: dict, step: int) -> None:
+def log_metrics(metrics: dict, step: int | None = None) -> None:
     """Log a dictionary of metrics to the active wandb run.
 
     Args:
         metrics: Key-value pairs (e.g. ``{"loss": 0.5, "lr": 3e-4}``).
-        step: Global step number for x-axis alignment.
+        step: Global step number for x-axis alignment. If ``None``,
+            wandb uses its internal global step counter.
     """
     wandb.log(metrics, step=step)

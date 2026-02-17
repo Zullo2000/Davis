@@ -85,9 +85,19 @@ Algorithm (MDLM ancestral sampling):
 3. Loop from `t=1` to `t=0` in `num_steps` steps:
    - Get model logits, apply guidance if provided
    - Compute `p_unmask = (alpha_next - alpha_now) / (1 - alpha_now + eps)`
-   - Stochastically unmask MASK positions (argmax or Gumbel based on temperature)
+   - Predict tokens for masked positions (argmax or Gumbel based on temperature)
+   - Select which MASK positions to unmask (see **Unmasking Modes** below)
    - Clamp PAD positions, apply fixed tokens and remasking if provided
 4. Final cleanup: remaining MASK → argmax at `t ≈ 0`
+
+**Unmasking Modes** (`unmasking_mode` parameter):
+
+| Mode | Strategy | Reference |
+|------|----------|-----------|
+| `"random"` (default) | Each MASK position is unmasked independently with probability `p_unmask` — a coin-flip per position. This is the standard MDLM approach. | Sahoo et al. (MDLM) |
+| `"confidence"` | Unmask the positions where the model is most confident first. At each step, a budget of `p_unmask × num_remaining_masked` positions is unmasked, selecting those with the highest `P(predicted_token)`. At the final step (`t→0`), all remaining masks are removed. | Nie et al. (LLaDA) |
+
+**Why confidence-based unmasking?** Random unmasking treats all positions equally, which can cause the model to commit early to low-confidence predictions that are hard to correct later. Confidence-based unmasking lets the model resolve easy/structural positions first (e.g., obvious room types, dominant edge relationships) and defer ambiguous positions to later steps when more context is available. This has been shown to improve sample quality in masked language model diffusion (LLaDA, MDLM++ variants).
 
 Extension hooks:
 - `guidance_fn((node_logits, edge_logits), x_t, t, pad_mask)` — logit modification per step
@@ -98,12 +108,30 @@ Extension hooks:
 
 | Hazard | Mitigation |
 |--------|------------|
-| `w(t) → ∞` as `t → 0` | Clamp `t ≥ 1e-5` and `w ≤ 1000` |
+| `w(t) → ∞` as `t → 0` | Clamp `t ≥ 1e-5` and `w ≤ 1000`; float64 internal computation |
 | `log(0)` in cosine sigma | Clamp `alpha_t ≥ 1e-8` before log |
 | Gumbel `log(-log(u))` underflow | float64 + clamp `u ∈ [1e-10, 1-1e-10]` |
-| `p_unmask` division by ~0 | `+1e-8` denominator + clamp to `[0, 1]` |
+| `p_unmask` catastrophic cancellation | **float64 via `alpha(t.double())`** + eps + clamp ([arXiv:2409.02908](https://arxiv.org/abs/2409.02908)) |
 | `N_active = 0` | Clamp `N_active ≥ 1.0` |
 | Importance sampling with `sigma_min=0` | Clamp `sigma_min ≥ 1e-4` in transform |
+
+### Float64 Precision for Transition Probabilities
+
+The sampling loop computes `p_unmask = (α(t_next) − α(t_now)) / (1 − α(t_now))` at each
+step. When the number of sampling steps N is large, `t_next` and `t_now` differ by only
+`1/N`, making `α(t_next)` and `α(t_now)` very close. In float32 (~7 decimal digits),
+the numerator `α(t_next) − α(t_now)` loses most significant digits to catastrophic
+cancellation. This effectively lowers the unmasking probability, reducing token diversity.
+
+Identified by Zheng et al. ([arXiv:2409.02908](https://arxiv.org/abs/2409.02908)) as a
+fundamental issue in MDLM-family models. The fix: compute `alpha(t)` in float64 (~15
+decimal digits) by passing `t.double()` to the existing `alpha()` method. PyTorch
+auto-promotes `float32 buffer + float64 tensor → float64`.
+
+Affected code:
+- **`sampling.py`** (inference): `p_unmask` computed via `alpha(t.double())`
+- **`loss.py`** (training): `w(t)` denominator `1 − α(t)` computed via `alpha(t.double())`
+- Model forward pass remains entirely in float32
 
 ## Configuration
 

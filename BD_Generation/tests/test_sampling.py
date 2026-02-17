@@ -483,3 +483,110 @@ class TestConfidenceUnmasking:
         )
         assert (result[:, : vocab_config.n_max] != NODE_MASK_IDX).all()
         assert (result[:, vocab_config.n_max :] != EDGE_MASK_IDX).all()
+
+
+# =========================================================================
+# Float64 Numerical Precision (arXiv:2409.02908)
+# =========================================================================
+
+
+class TestFloat64Precision:
+    """Verify float64 fixes for catastrophic cancellation.
+
+    Reference: Zheng et al., "Masked Diffusion Models are Secretly
+    Time-Agnostic Masked Models and Exploit Inaccurate Categorical
+    Sampling" (arXiv:2409.02908).
+    """
+
+    def test_p_unmask_accuracy_high_steps(self, linear_schedule):
+        """At N=10000, float64 p_unmask matches ground truth better
+        than float32.
+        """
+        schedule = linear_schedule
+        N = 10000
+
+        # Pick a mid-range step where both alpha values are moderate
+        i = N // 2
+        t_now = (i + 1) / N
+        t_next = i / N
+
+        # Ground truth: compute entirely in float64
+        t_now_64 = torch.tensor([t_now], dtype=torch.float64)
+        t_next_64 = torch.tensor([t_next], dtype=torch.float64)
+        alpha_now_gt = schedule.alpha(t_now_64)
+        alpha_next_gt = schedule.alpha(t_next_64)
+        p_unmask_gt = (
+            (alpha_next_gt - alpha_now_gt) / (1.0 - alpha_now_gt)
+        ).item()
+
+        # Float32 (old code path)
+        t_now_32 = torch.tensor([t_now], dtype=torch.float32)
+        t_next_32 = torch.tensor([t_next], dtype=torch.float32)
+        alpha_now_32 = schedule.alpha(t_now_32)
+        alpha_next_32 = schedule.alpha(t_next_32)
+        p_unmask_32 = (
+            (alpha_next_32 - alpha_now_32) / (1.0 - alpha_now_32 + 1e-8)
+        ).item()
+
+        # Float64 (new code path): pass t.double() to alpha()
+        alpha_now_64_fix = schedule.alpha(t_now_32.double())
+        alpha_next_64_fix = schedule.alpha(t_next_32.double())
+        p_unmask_64 = (
+            (alpha_next_64_fix - alpha_now_64_fix)
+            / (1.0 - alpha_now_64_fix + 1e-8)
+        ).item()
+
+        err_32 = abs(p_unmask_32 - p_unmask_gt)
+        err_64 = abs(p_unmask_64 - p_unmask_gt)
+
+        # float64 should be more accurate (or both negligible)
+        assert err_64 <= err_32 or err_32 < 1e-12, (
+            f"float64 not more accurate: err_32={err_32:.2e}, "
+            f"err_64={err_64:.2e}, p_gt={p_unmask_gt:.10e}"
+        )
+
+    def test_p_unmask_nonzero_extreme_steps(self, linear_schedule):
+        """At N=50000, p_unmask should remain positive (not zeroed by
+        float32 cancellation).
+        """
+        schedule = linear_schedule
+        N = 50000
+
+        for i in [N // 4, N // 2, 3 * N // 4]:
+            t_now = (i + 1) / N
+            t_next = i / N
+
+            t_now_t = torch.tensor([t_now], dtype=torch.float32)
+            t_next_t = torch.tensor([t_next], dtype=torch.float32)
+
+            alpha_now = schedule.alpha(t_now_t.double())
+            alpha_next = schedule.alpha(t_next_t.double())
+            p_unmask = (
+                (alpha_next - alpha_now) / (1.0 - alpha_now + 1e-8)
+            )
+            assert p_unmask.item() > 0, (
+                f"p_unmask is zero at step {i}/{N}: "
+                f"alpha_now={alpha_now.item():.15e}, "
+                f"alpha_next={alpha_next.item():.15e}"
+            )
+
+    def test_entropy_preserved_high_steps(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """With high num_steps, generated tokens should still show
+        diversity (entropy not collapsed).
+        """
+        torch.manual_seed(42)
+        result = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=10, num_steps=500, temperature=1.0,
+            fixed_num_rooms=8,
+        )
+        node_tokens = result[:, :vocab_config.n_max]
+        unique_types = node_tokens.unique()
+        # With a random model and temperature=1.0, Gumbel noise should
+        # produce multiple distinct types across 10 * 8 = 80 positions.
+        assert len(unique_types) >= 2, (
+            f"Token diversity collapsed: only {len(unique_types)} unique "
+            f"node types across 10 samples with 500 steps"
+        )

@@ -15,7 +15,11 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from bd_gen.data.vocab import (
+    EDGE_MASK_IDX,
+    EDGE_PAD_IDX,
     EDGE_VOCAB_SIZE,
+    NODE_MASK_IDX,
+    NODE_PAD_IDX,
     NODE_VOCAB_SIZE,
     VocabConfig,
 )
@@ -210,5 +214,11 @@ class BDDenoiser(nn.Module):
         # 10. Classification heads
         node_logits = self.node_head(node_features)  # (B, n_max, NODE_VOCAB_SIZE)
         edge_logits = self.edge_head(edge_features)  # (B, n_edges, EDGE_VOCAB_SIZE)
+
+        # 11. SUBS zero masking probabilities: prevent predicting MASK or PAD
+        node_logits[:, :, NODE_MASK_IDX] = float('-inf')
+        node_logits[:, :, NODE_PAD_IDX] = float('-inf')
+        edge_logits[:, :, EDGE_MASK_IDX] = float('-inf')
+        edge_logits[:, :, EDGE_PAD_IDX] = float('-inf')
 
         return node_logits, edge_logits

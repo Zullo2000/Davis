@@ -12,7 +12,7 @@ graph edit distance for performance. GED is impractical at scale
 from __future__ import annotations
 
 import math
-from collections import Counter
+from collections import Counter, defaultdict
 
 import networkx as nx
 import numpy as np
@@ -124,6 +124,85 @@ def distribution_match(
     }
 
 
+def conditional_edge_kl(
+    samples: list[dict],
+    training_set: list[dict],
+    *,
+    min_pair_count: int = 5,
+) -> dict[str, float]:
+    """KL divergence of edge types conditioned on canonical room-type pair.
+
+    Unlike the marginal ``edge_kl`` in :func:`distribution_match`, this
+    computes the edge-type distribution separately for each room-type pair
+    (e.g. LivingRoom–Bathroom) and then averages the per-pair KL values.
+    This catches cases where the model applies the wrong spatial
+    relationship for a specific room combination (e.g. "Bath surrounding
+    LivingRoom").
+
+    Room-type pairs are **canonicalized**: if ``type_i > type_j``, the
+    pair is swapped and ``rel`` is inverted (``9 - rel``), so the same
+    physical arrangement always maps to the same ``(pair, rel)``
+    regardless of node ordering.
+
+    Args:
+        samples: Generated graph dicts.
+        training_set: Training graph dicts.
+        min_pair_count: Skip training pairs with fewer total edges than
+            this.  Sparse pairs have unreliable histograms.
+
+    Returns:
+        Dict with ``conditional_edge_kl_mean`` (unweighted mean KL over
+        eligible pairs), ``conditional_edge_kl_weighted`` (training-
+        frequency-weighted mean KL), and ``num_pairs_evaluated`` (number
+        of canonical pairs compared).  Returns all zeros if either input
+        is empty or no pairs pass the threshold.
+    """
+    zeros = {
+        "conditional_edge_kl_mean": 0.0,
+        "conditional_edge_kl_weighted": 0.0,
+        "num_pairs_evaluated": 0.0,
+    }
+    if not samples or not training_set:
+        return zeros
+
+    train_hists, train_counts = _conditional_edge_histogram(training_set)
+    sample_hists, _ = _conditional_edge_histogram(samples)
+
+    # Filter to pairs with enough training data
+    eligible_pairs = [
+        pair for pair, count in train_counts.items()
+        if count >= min_pair_count
+    ]
+    if not eligible_pairs:
+        return zeros
+
+    total_train_edges = sum(train_counts[p] for p in eligible_pairs)
+    n_rel = len(EDGE_TYPES)
+    uniform = [1.0 / n_rel] * n_rel
+
+    kl_values: list[float] = []
+    weights: list[float] = []
+
+    for pair in eligible_pairs:
+        train_hist = train_hists[pair]
+        # Uniform fallback when pair has no sample edges (avoids false KL=0)
+        sample_hist = sample_hists.get(pair, uniform)
+
+        kl = _kl_divergence(sample_hist, train_hist)
+        kl_values.append(kl)
+        weights.append(train_counts[pair] / total_train_edges)
+
+    n = len(kl_values)
+    mean_kl = sum(kl_values) / n
+    weighted_kl = sum(w * kl for w, kl in zip(weights, kl_values))
+
+    return {
+        "conditional_edge_kl_mean": mean_kl,
+        "conditional_edge_kl_weighted": weighted_kl,
+        "num_pairs_evaluated": float(n),
+    }
+
+
 def per_class_accuracy(
     predictions: Tensor,
     targets: Tensor,
@@ -165,6 +244,8 @@ def graph_structure_mmd(
     *,
     n_max: int = 8,
     sigma: float | None = None,
+    max_samples: int = 5000,
+    seed: int = 42,
 ) -> dict[str, float]:
     """MMD-based structural comparison between generated and reference graphs.
 
@@ -178,6 +259,10 @@ def graph_structure_mmd(
         reference: Reference (training/test) graph dicts.
         n_max: Maximum number of nodes (for histogram padding). Defaults to 8.
         sigma: Bandwidth for Gaussian RBF kernel. ``None`` = median heuristic.
+        max_samples: Maximum number of graphs from each set to use. Both
+            sets are randomly subsampled (without replacement) if they
+            exceed this limit. Prevents OOM on large datasets.
+        seed: Random seed for reproducible subsampling.
 
     Returns:
         Dict with ``mmd_degree``, ``mmd_clustering``, ``mmd_spectral``
@@ -197,6 +282,15 @@ def graph_structure_mmd(
     if not sample_graphs or not ref_graphs:
         return zeros
 
+    # Subsample to avoid OOM on large datasets
+    rng = np.random.RandomState(seed)
+    if len(sample_graphs) > max_samples:
+        idx = rng.choice(len(sample_graphs), max_samples, replace=False)
+        sample_graphs = [sample_graphs[i] for i in idx]
+    if len(ref_graphs) > max_samples:
+        idx = rng.choice(len(ref_graphs), max_samples, replace=False)
+        ref_graphs = [ref_graphs[i] for i in idx]
+
     # Extract features
     s_deg = [_degree_histogram(g, n_max) for g in sample_graphs]
     r_deg = [_degree_histogram(g, n_max) for g in ref_graphs]
@@ -209,6 +303,201 @@ def graph_structure_mmd(
         "mmd_degree": _compute_mmd(s_deg, r_deg, sigma=sigma),
         "mmd_clustering": _compute_mmd(s_clust, r_clust, sigma=sigma),
         "mmd_spectral": _compute_mmd(s_spec, r_spec, sigma=sigma),
+    }
+
+
+def spatial_transitivity(graph_dicts: list[dict]) -> dict[str, float]:
+    """Fraction of graphs whose spatial relationships are 2D-consistent.
+
+    A bubble diagram can pass all validity checks (connected, correct
+    types, no MASK residue) yet be *physically impossible* because its
+    spatial relationships contradict each other.  For example, if room A
+    is left-of B and B is left-of C, then A cannot be right-of C — that
+    would require A to be both left *and* right of C in the same layout.
+
+    This metric decomposes each edge relationship into horizontal and
+    vertical ordering constraints and checks for directed cycles on each
+    axis.  A cycle means no 2D placement can satisfy all relationships
+    simultaneously.
+
+    Relationships ``inside`` (4) and ``surrounding`` (5) are containment
+    relationships that do not impose strict positional ordering, so they
+    contribute no constraints.
+
+    Args:
+        graph_dicts: List of detokenized graph dicts.
+
+    Returns:
+        Dict with ``transitivity_score`` (fraction with no contradictions,
+        higher is better), ``h_consistent`` (no horizontal contradictions),
+        and ``v_consistent`` (no vertical contradictions).
+        Returns all 1.0 for empty input.
+    """
+    if not graph_dicts:
+        return {
+            "transitivity_score": 1.0,
+            "h_consistent": 1.0,
+            "v_consistent": 1.0,
+        }
+
+    h_ok = 0
+    v_ok = 0
+    both_ok = 0
+    for g in graph_dicts:
+        result = _check_spatial_consistency(g)
+        if result["h_consistent"]:
+            h_ok += 1
+        if result["v_consistent"]:
+            v_ok += 1
+        if result["overall"]:
+            both_ok += 1
+
+    n = len(graph_dicts)
+    return {
+        "transitivity_score": both_ok / n,
+        "h_consistent": h_ok / n,
+        "v_consistent": v_ok / n,
+    }
+
+
+def type_conditioned_degree_kl(
+    samples: list[dict],
+    reference: list[dict],
+    *,
+    n_max: int = 8,
+    min_type_count: int = 20,
+) -> dict[str, float]:
+    """KL divergence of node degree distributions conditioned on room type.
+
+    In real floorplans, different room types have characteristic
+    connectivity patterns: bathrooms typically connect to 1--2 rooms while
+    living rooms connect to 3--5.  The global ``mmd_degree`` metric pools
+    all room types into a single histogram, so a model could match the
+    overall degree distribution while getting per-type connectivity wrong.
+
+    This metric computes, for each room type, a histogram of node degrees
+    across all graphs, then measures KL(samples || reference) per type.
+
+    Room types with fewer than *min_type_count* nodes in the reference set
+    are excluded (their empirical histogram is too noisy).
+
+    Args:
+        samples: Generated graph dicts.
+        reference: Reference (training) graph dicts.
+        n_max: Maximum number of rooms (histogram length).
+        min_type_count: Minimum reference nodes to include a type.
+
+    Returns:
+        Dict with ``degree_kl_per_type_mean`` (unweighted mean KL),
+        ``degree_kl_per_type_weighted`` (reference-frequency-weighted
+        mean KL), and ``num_types_evaluated``.
+        Returns all zeros if either input is empty or no types qualify.
+    """
+    zeros = {
+        "degree_kl_per_type_mean": 0.0,
+        "degree_kl_per_type_weighted": 0.0,
+        "num_types_evaluated": 0.0,
+    }
+    if not samples or not reference:
+        return zeros
+
+    ref_hists, ref_counts = _per_type_degree_histograms(reference, n_max)
+    sample_hists, _ = _per_type_degree_histograms(samples, n_max)
+
+    eligible_types = [
+        t for t, c in ref_counts.items() if c >= min_type_count
+    ]
+    if not eligible_types:
+        return zeros
+
+    total_ref_nodes = sum(ref_counts[t] for t in eligible_types)
+    uniform = [1.0 / n_max] * n_max
+
+    kl_values: list[float] = []
+    weights: list[float] = []
+
+    for room_type in eligible_types:
+        ref_hist = ref_hists[room_type]
+        sample_hist = sample_hists.get(room_type, uniform)
+        kl = _kl_divergence(sample_hist, ref_hist)
+        kl_values.append(kl)
+        weights.append(ref_counts[room_type] / total_ref_nodes)
+
+    n = len(kl_values)
+    return {
+        "degree_kl_per_type_mean": sum(kl_values) / n,
+        "degree_kl_per_type_weighted": sum(
+            w * kl for w, kl in zip(weights, kl_values)
+        ),
+        "num_types_evaluated": float(n),
+    }
+
+
+def mode_coverage(
+    samples: list[dict],
+    training_set: list[dict],
+) -> dict[str, float]:
+    """Fraction of training room-type combinations covered by samples.
+
+    ``diversity`` measures whether generated samples differ from *each
+    other*; ``novelty`` measures whether they differ from *training data*.
+    Neither checks whether the model covers the full **range** of graph
+    archetypes.  A model that generates 1000 unique 4-bedroom layouts but
+    never produces a studio apartment scores high on both diversity and
+    novelty, yet suffers from mode collapse.
+
+    An "archetype" is the sorted multiset of room types in a graph (e.g.
+    ``(LivingRoom, Kitchen, Bathroom, Bedroom)``).  This metric computes
+    what fraction of training archetypes appear at least once in the
+    generated set.
+
+    Args:
+        samples: Generated graph dicts.
+        training_set: Training graph dicts.
+
+    Returns:
+        Dict with ``mode_coverage`` (unweighted: fraction of distinct
+        training archetypes produced), ``mode_coverage_weighted``
+        (weighted by training archetype frequency), ``num_training_modes``
+        (total distinct archetypes in training), and ``num_sample_modes``
+        (total distinct archetypes in samples).
+        Returns all zeros if either input is empty.
+    """
+    if not samples or not training_set:
+        return {
+            "mode_coverage": 0.0,
+            "mode_coverage_weighted": 0.0,
+            "num_training_modes": 0.0,
+            "num_sample_modes": 0.0,
+        }
+
+    # Training archetype frequencies
+    train_counts: Counter = Counter()
+    for g in training_set:
+        train_counts[_archetype_hash(g)] += 1
+
+    sample_archetypes = {_archetype_hash(g) for g in samples}
+
+    n_train_modes = len(train_counts)
+    if n_train_modes == 0:
+        return {
+            "mode_coverage": 0.0,
+            "mode_coverage_weighted": 0.0,
+            "num_training_modes": 0.0,
+            "num_sample_modes": float(len(sample_archetypes)),
+        }
+
+    covered = sample_archetypes & set(train_counts.keys())
+    unweighted = len(covered) / n_train_modes
+
+    total_train = sum(train_counts.values())
+    weighted = sum(train_counts[a] for a in covered) / total_train
+
+    return {
+        "mode_coverage": unweighted,
+        "mode_coverage_weighted": weighted,
+        "num_training_modes": float(n_train_modes),
+        "num_sample_modes": float(len(sample_archetypes)),
     }
 
 
@@ -296,6 +585,52 @@ def _kl_divergence(p: list[float], q: list[float]) -> float:
             kl += pi * math.log(pi / (qi + eps))
 
     return kl
+
+
+def _canonicalize_edge(
+    type_i: int, type_j: int, rel: int,
+) -> tuple[tuple[int, int], int]:
+    """Canonical form for a room-type-pair + relationship.
+
+    Ensures the lower room-type index comes first.  If swapped, the
+    relationship is inverted (``9 - rel``) to preserve spatial semantics.
+    """
+    if type_i > type_j:
+        return (type_j, type_i), 9 - rel
+    return (type_i, type_j), rel
+
+
+def _conditional_edge_histogram(
+    graph_dicts: list[dict],
+) -> tuple[dict[tuple[int, int], list[float]], dict[tuple[int, int], int]]:
+    """Per-canonical-room-pair edge-type histograms.
+
+    Returns:
+        A tuple ``(histograms, counts)`` where *histograms* maps each
+        canonical pair to a normalized ``list[float]`` of length
+        ``len(EDGE_TYPES)`` and *counts* maps each pair to its raw
+        total edge count.
+    """
+    raw: dict[tuple[int, int], Counter] = defaultdict(Counter)
+
+    for g in graph_dicts:
+        node_types = g["node_types"]
+        for node_i, node_j, rel in g["edge_triples"]:
+            type_i = node_types[node_i]
+            type_j = node_types[node_j]
+            pair, canon_rel = _canonicalize_edge(type_i, type_j, rel)
+            raw[pair][canon_rel] += 1
+
+    n_rel = len(EDGE_TYPES)
+    histograms: dict[tuple[int, int], list[float]] = {}
+    counts: dict[tuple[int, int], int] = {}
+
+    for pair, counter in raw.items():
+        total = sum(counter.values())
+        counts[pair] = total
+        histograms[pair] = [counter.get(i, 0) / total for i in range(n_rel)]
+
+    return histograms, counts
 
 
 # ---------------------------------------------------------------------------
@@ -418,3 +753,162 @@ def _compute_mmd(
 
     mmd2 = mmd_xx + mmd_yy - 2.0 * mmd_xy
     return max(0.0, float(mmd2))
+
+
+# ---------------------------------------------------------------------------
+# Spatial transitivity helpers
+# ---------------------------------------------------------------------------
+
+# Horizontal and vertical ordering constraints per edge type.
+# "left" means A.x < B.x, "right" means A.x > B.x (H-axis).
+# "above" means A.y > B.y, "below" means A.y < B.y (V-axis).
+# None = no constraint on that axis.
+# inside/surrounding are containment — no strict positional ordering.
+_H_CONSTRAINT: dict[int, str | None] = {
+    0: "left",      # left-above
+    1: "left",      # left-below
+    2: "left",      # left-of
+    3: None,        # above
+    4: None,        # inside
+    5: None,        # surrounding
+    6: None,        # below
+    7: "right",     # right-of
+    8: "right",     # right-above
+    9: "right",     # right-below
+}
+_V_CONSTRAINT: dict[int, str | None] = {
+    0: "above",     # left-above
+    1: "below",     # left-below
+    2: None,        # left-of
+    3: "above",     # above
+    4: None,        # inside
+    5: None,        # surrounding
+    6: "below",     # below
+    7: None,        # right-of
+    8: "above",     # right-above
+    9: "below",     # right-below
+}
+
+
+def _has_cycle(adj: list[list[int]], n: int) -> bool:
+    """Detect a cycle in a directed graph via DFS.
+
+    Args:
+        adj: Adjacency list — adj[u] is the list of nodes reachable from u.
+        n: Number of nodes.
+
+    Returns:
+        True if the directed graph contains a cycle.
+    """
+    # 0 = unvisited, 1 = in current DFS stack, 2 = finished
+    state = [0] * n
+    for start in range(n):
+        if state[start] == 2:
+            continue
+        stack = [(start, 0)]
+        state[start] = 1
+        while stack:
+            node, idx = stack[-1]
+            if idx < len(adj[node]):
+                stack[-1] = (node, idx + 1)
+                nxt = adj[node][idx]
+                if state[nxt] == 1:
+                    return True
+                if state[nxt] == 0:
+                    state[nxt] = 1
+                    stack.append((nxt, 0))
+            else:
+                state[node] = 2
+                stack.pop()
+    return False
+
+
+def _check_spatial_consistency(graph_dict: dict) -> dict[str, bool]:
+    """Check one graph for spatial contradictions on H and V axes.
+
+    Builds directed ordering graphs for horizontal and vertical axes
+    from edge relationships, then checks for cycles.
+    """
+    n = graph_dict.get("num_rooms", 0)
+    if n <= 1:
+        return {"h_consistent": True, "v_consistent": True, "overall": True}
+
+    h_adj: list[list[int]] = [[] for _ in range(n)]
+    v_adj: list[list[int]] = [[] for _ in range(n)]
+
+    for node_i, node_j, rel in graph_dict.get("edge_triples", []):
+        h = _H_CONSTRAINT.get(rel)
+        v = _V_CONSTRAINT.get(rel)
+
+        # Horizontal: "left" means i.x < j.x → edge i→j in ordering graph
+        # "right" means i.x > j.x → edge j→i
+        if h == "left":
+            h_adj[node_i].append(node_j)
+        elif h == "right":
+            h_adj[node_j].append(node_i)
+
+        # Vertical: "above" means i.y > j.y → edge j→i (j is lower)
+        # "below" means i.y < j.y → edge i→j
+        if v == "above":
+            v_adj[node_j].append(node_i)
+        elif v == "below":
+            v_adj[node_i].append(node_j)
+
+    h_ok = not _has_cycle(h_adj, n)
+    v_ok = not _has_cycle(v_adj, n)
+
+    return {"h_consistent": h_ok, "v_consistent": v_ok, "overall": h_ok and v_ok}
+
+
+# ---------------------------------------------------------------------------
+# Type-conditioned degree helpers
+# ---------------------------------------------------------------------------
+
+
+def _per_type_degree_histograms(
+    graph_dicts: list[dict],
+    n_max: int,
+) -> tuple[dict[int, list[float]], dict[int, int]]:
+    """Per-room-type degree histograms across a set of graphs.
+
+    Returns:
+        ``(histograms, counts)`` where *histograms* maps room type index
+        to a normalized degree histogram of length *n_max*, and *counts*
+        maps room type to total node count.
+    """
+    raw: dict[int, Counter] = defaultdict(Counter)
+    type_counts: dict[int, int] = defaultdict(int)
+
+    for g in graph_dicts:
+        node_types = g["node_types"]
+        n = g.get("num_rooms", len(node_types))
+        # Build adjacency count per node
+        degree = [0] * n
+        for node_i, node_j, _rel in g.get("edge_triples", []):
+            degree[node_i] += 1
+            degree[node_j] += 1
+
+        for idx in range(n):
+            room_type = node_types[idx]
+            deg = min(degree[idx], n_max - 1)
+            raw[room_type][deg] += 1
+            type_counts[room_type] += 1
+
+    histograms: dict[int, list[float]] = {}
+    for room_type, counter in raw.items():
+        total = sum(counter.values())
+        histograms[room_type] = [
+            counter.get(i, 0) / total for i in range(n_max)
+        ]
+
+    return histograms, dict(type_counts)
+
+
+# ---------------------------------------------------------------------------
+# Mode coverage helpers
+# ---------------------------------------------------------------------------
+
+
+def _archetype_hash(graph_dict: dict) -> tuple[int, ...]:
+    """Sorted tuple of node types — the room-type "archetype" of a graph."""
+    return tuple(sorted(graph_dict["node_types"]))
