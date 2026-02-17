@@ -20,6 +20,8 @@ from bd_gen.data.vocab import (
     NODE_MASK_IDX,
     NODE_PAD_IDX,
 )
+import pytest
+
 from bd_gen.diffusion.sampling import sample
 
 # =========================================================================
@@ -392,5 +394,92 @@ class TestAdversarialSampling:
             batch_size=4, num_steps=1, fixed_num_rooms=8,
         )
         # No MASK tokens should remain
+        assert (result[:, : vocab_config.n_max] != NODE_MASK_IDX).all()
+        assert (result[:, vocab_config.n_max :] != EDGE_MASK_IDX).all()
+
+
+# =========================================================================
+# Confidence-Based Unmasking
+# =========================================================================
+
+
+class TestConfidenceUnmasking:
+    """Tests for unmasking_mode='confidence'."""
+
+    def test_confidence_no_mask_in_output(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """Confidence mode produces no MASK tokens in final output."""
+        result = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=4, num_steps=10, fixed_num_rooms=8,
+            unmasking_mode="confidence",
+        )
+        assert (result[:, : vocab_config.n_max] != NODE_MASK_IDX).all()
+        assert (result[:, vocab_config.n_max :] != EDGE_MASK_IDX).all()
+
+    def test_confidence_pad_preserved(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """PAD positions remain PAD in confidence mode."""
+        result = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=4, num_steps=10, fixed_num_rooms=3,
+            unmasking_mode="confidence",
+        )
+        n_max = vocab_config.n_max
+        assert (result[:, 3:n_max] == NODE_PAD_IDX).all()
+        pad_mask = vocab_config.compute_pad_mask(3)
+        for pos in range(vocab_config.n_edges):
+            if not pad_mask[n_max + pos]:
+                assert (result[:, n_max + pos] == EDGE_PAD_IDX).all()
+
+    def test_confidence_output_shape(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        result = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=4, num_steps=5, fixed_num_rooms=4,
+            unmasking_mode="confidence",
+        )
+        assert result.shape == (4, vocab_config.seq_len)
+        assert result.dtype == torch.long
+
+    def test_random_mode_explicit(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """Explicit unmasking_mode='random' matches default behavior."""
+        torch.manual_seed(42)
+        r_default = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=2, num_steps=5, fixed_num_rooms=4,
+        )
+        torch.manual_seed(42)
+        r_explicit = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=2, num_steps=5, fixed_num_rooms=4,
+            unmasking_mode="random",
+        )
+        assert torch.equal(r_default, r_explicit)
+
+    def test_invalid_mode_raises(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        with pytest.raises(ValueError, match="Unknown unmasking_mode"):
+            sample(
+                dummy_model, linear_schedule, vocab_config,
+                batch_size=2, num_steps=5, fixed_num_rooms=4,
+                unmasking_mode="invalid",
+            )
+
+    def test_confidence_single_step(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """Single step with confidence mode still clears all masks."""
+        result = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=4, num_steps=1, fixed_num_rooms=8,
+            unmasking_mode="confidence",
+        )
         assert (result[:, : vocab_config.n_max] != NODE_MASK_IDX).all()
         assert (result[:, vocab_config.n_max :] != EDGE_MASK_IDX).all()

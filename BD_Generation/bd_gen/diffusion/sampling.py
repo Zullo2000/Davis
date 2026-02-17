@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Callable
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from bd_gen.data.vocab import (
@@ -85,6 +86,7 @@ def sample(
     batch_size: int,
     num_steps: int,
     temperature: float = 0.0,
+    unmasking_mode: str = "random",
     guidance_fn: Callable | None = None,
     fixed_tokens: Tensor | None = None,
     fixed_mask: Tensor | None = None,
@@ -104,6 +106,10 @@ def sample(
         num_steps: Number of discrete denoising steps (N).
         temperature: Sampling temperature. 0.0 = deterministic argmax.
             > 0.0 = stochastic via Gumbel-perturbed logits.
+        unmasking_mode: Strategy for selecting which MASK positions to
+            unmask at each step. "random" = probabilistic coin-flip per
+            position (original MDLM). "confidence" = unmask highest-
+            confidence positions first (LLaDA-style).
         guidance_fn: Optional callable that receives
             ``((node_logits, edge_logits), x_t, t_scalar, pad_mask)``
             and returns a modified ``(node_logits, edge_logits)`` tuple.
@@ -187,19 +193,8 @@ def sample(
         p_unmask = torch.clamp(p_unmask, min=0.0, max=1.0)
         p_unmask = p_unmask.unsqueeze(1)  # (B, 1) for broadcasting
 
-        # 4d. Decide which MASK positions to unmask
-        unmask_rand = torch.rand(batch_size, seq_len, device=device)
-        should_unmask = unmask_rand < p_unmask  # (B, SEQ_LEN)
-
-        # Identify currently masked positions
-        is_node_mask = x_t[:, :n_max] == NODE_MASK_IDX  # (B, n_max)
-        is_edge_mask = x_t[:, n_max:] == EDGE_MASK_IDX  # (B, n_edges)
-        is_mask = torch.cat([is_node_mask, is_edge_mask], dim=1)  # (B, SEQ_LEN)
-
-        # Only unmask positions that are currently MASK
-        should_unmask = should_unmask & is_mask
-
-        # 4e. Choose tokens for unmasked positions
+        # 4d. Choose predicted tokens (needed before unmasking decision
+        #     for confidence mode)
         if temperature == 0.0:
             node_pred = node_logits.argmax(dim=-1)  # (B, n_max)
             edge_pred = edge_logits.argmax(dim=-1)  # (B, n_edges)
@@ -211,17 +206,68 @@ def sample(
 
         pred_tokens = torch.cat([node_pred, edge_pred], dim=1)  # (B, SEQ_LEN)
 
-        # 4f. Update x_t: unmask selected positions, keep rest
+        # 4e. Identify currently masked positions
+        is_node_mask = x_t[:, :n_max] == NODE_MASK_IDX  # (B, n_max)
+        is_edge_mask = x_t[:, n_max:] == EDGE_MASK_IDX  # (B, n_edges)
+        is_mask = torch.cat([is_node_mask, is_edge_mask], dim=1)  # (B, SEQ_LEN)
+
+        # 4f. Decide which MASK positions to unmask
+        if unmasking_mode == "random":
+            unmask_rand = torch.rand(batch_size, seq_len, device=device)
+            should_unmask = (unmask_rand < p_unmask) & is_mask
+        elif unmasking_mode == "confidence":
+            # Per-position confidence = P(predicted token)
+            node_probs = F.softmax(node_logits, dim=-1)
+            edge_probs = F.softmax(edge_logits, dim=-1)
+            node_conf = node_probs.gather(
+                -1, node_pred.unsqueeze(-1)
+            ).squeeze(-1)  # (B, n_max)
+            edge_conf = edge_probs.gather(
+                -1, edge_pred.unsqueeze(-1)
+            ).squeeze(-1)  # (B, n_edges)
+            confidence = torch.cat([node_conf, edge_conf], dim=1)
+
+            # Non-mask positions → -inf (never selected)
+            confidence = torch.where(
+                is_mask, confidence,
+                torch.tensor(-float("inf"), device=device),
+            )
+
+            # Budget: fraction of remaining masked tokens
+            num_masked = is_mask.sum(dim=1)  # (B,)
+            num_to_unmask = (
+                (p_unmask.squeeze(1) * num_masked.float())
+                .round().long().clamp(min=1)
+            )
+
+            if i == 0:
+                # Last step: unmask everything remaining
+                should_unmask = is_mask
+            else:
+                # TODO: vectorize this per-sample loop for performance
+                should_unmask = torch.zeros_like(is_mask)
+                for b in range(batch_size):
+                    k = int(min(num_to_unmask[b].item(), num_masked[b].item()))
+                    if k > 0:
+                        _, topk_idx = torch.topk(confidence[b], k)
+                        should_unmask[b, topk_idx] = True
+        else:
+            raise ValueError(
+                f"Unknown unmasking_mode: {unmasking_mode!r}. "
+                "Use 'random' or 'confidence'."
+            )
+
+        # 4g. Update x_t: unmask selected positions, keep rest
         x_t = torch.where(should_unmask, pred_tokens, x_t)
 
-        # 4g. Clamp PAD positions
+        # 4h. Clamp PAD positions
         x_t = _clamp_pad(x_t, pad_mask, n_max)
 
-        # 4h. Apply fixed_tokens for inpainting
+        # 4i. Apply fixed_tokens for inpainting
         if fixed_tokens is not None and fixed_mask is not None:
             x_t = torch.where(fixed_mask, fixed_tokens.to(device), x_t)
 
-        # 4i. Apply remasking if provided (ReMDM)
+        # 4j. Apply remasking if provided (ReMDM)
         if remasking_fn is not None:
             x_t = remasking_fn(x_t, t_next)
 
