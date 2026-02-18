@@ -333,7 +333,7 @@ class TestGuidanceAndInpainting:
         """A remasking_fn that tracks calls is invoked at each step except the last."""
         call_count = [0]
 
-        def tracking_remasking(x_t, t_now, t_next, pad_mask):
+        def tracking_remasking(x_t, t_now, t_next, pad_mask, **kwargs):
             call_count[0] += 1
             return x_t
 
