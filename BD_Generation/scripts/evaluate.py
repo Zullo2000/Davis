@@ -500,10 +500,13 @@ def evaluate(cfg: DictConfig) -> None:
     from eval_results.save_utils import save_eval_result  # noqa: E402
 
     remasking_cfg = cfg.eval.remasking
+    unmasking_mode = cfg.eval.get("unmasking_mode", "random")
     if remasking_cfg.enabled:
         method_name = f"remdm_{remasking_cfg.strategy}_eta{remasking_cfg.eta}"
     else:
         method_name = "mdlm_baseline"
+    if unmasking_mode != "random":
+        method_name += f"_{unmasking_mode}"
     eval_result_path = _PROJECT_ROOT / "eval_results" / f"{method_name}.json"
     save_eval_result(
         path=eval_result_path,
