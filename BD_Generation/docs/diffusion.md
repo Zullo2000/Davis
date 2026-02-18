@@ -95,7 +95,7 @@ Algorithm (MDLM ancestral sampling):
 | Mode | Strategy | Reference |
 |------|----------|-----------|
 | `"random"` (default) | Each MASK position is unmasked independently with probability `p_unmask` — a coin-flip per position. This is the standard MDLM approach. | Sahoo et al. (MDLM) |
-| `"confidence"` | Unmask the positions where the model is most confident first. At each step, a budget of `p_unmask × num_remaining_masked` positions is unmasked, selecting those with the highest `P(predicted_token)`. At the final step (`t→0`), all remaining masks are removed. | Nie et al. (LLaDA) |
+| `"llada"` | Unmask the positions where the model is most confident first. At each step, a budget of `p_unmask × num_remaining_masked` positions is unmasked, selecting those with the highest `P(predicted_token)`. At the final step (`t→0`), all remaining masks are removed. | Nie et al. (LLaDA) |
 
 **Why confidence-based unmasking?** Random unmasking treats all positions equally, which can cause the model to commit early to low-confidence predictions that are hard to correct later. Confidence-based unmasking lets the model resolve easy/structural positions first (e.g., obvious room types, dominant edge relationships) and defer ambiguous positions to later steps when more context is available. This has been shown to improve sample quality in masked language model diffusion (LLaDA, MDLM++ variants).
 

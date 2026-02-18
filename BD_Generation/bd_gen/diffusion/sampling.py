@@ -108,8 +108,8 @@ def sample(
             > 0.0 = stochastic via Gumbel-perturbed logits.
         unmasking_mode: Strategy for selecting which MASK positions to
             unmask at each step. "random" = probabilistic coin-flip per
-            position (original MDLM). "confidence" = unmask highest-
-            confidence positions first (LLaDA-style).
+            position (original MDLM). "llada" = unmask highest-
+            confidence positions first (LLaDA-style, Nie et al.).
         guidance_fn: Optional callable that receives
             ``((node_logits, edge_logits), x_t, t_scalar, pad_mask)``
             and returns a modified ``(node_logits, edge_logits)`` tuple.
@@ -221,7 +221,7 @@ def sample(
         if unmasking_mode == "random":
             unmask_rand = torch.rand(batch_size, seq_len, device=device)
             should_unmask = (unmask_rand < p_unmask) & is_mask
-        elif unmasking_mode == "confidence":
+        elif unmasking_mode == "llada":
             # Per-position confidence = P(predicted token)
             node_probs = F.softmax(node_logits, dim=-1)
             edge_probs = F.softmax(edge_logits, dim=-1)
@@ -260,7 +260,7 @@ def sample(
         else:
             raise ValueError(
                 f"Unknown unmasking_mode: {unmasking_mode!r}. "
-                "Use 'random' or 'confidence'."
+                "Use 'random' or 'llada'."
             )
 
         # 4g. Update x_t: unmask selected positions, keep rest

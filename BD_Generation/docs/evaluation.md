@@ -287,13 +287,13 @@ python scripts/sample.py \
     eval.checkpoint_path=path/to/checkpoint.pt \
     eval.num_samples=16 \
     eval.temperature=0.5 \
-    eval.unmasking_mode=confidence \
+    eval.unmasking_mode=llada \
     wandb.mode=disabled
 ```
 
 The `unmasking_mode` parameter controls how MASK positions are selected for unmasking at each step:
 - `"random"` (default) — independent coin-flip per position (standard MDLM).
-- `"confidence"` — unmask highest-confidence positions first (LLaDA-style). See [diffusion.md](diffusion.md) for details.
+- `"llada"` — unmask highest-confidence positions first (LLaDA-style, Nie et al.). See [diffusion.md](diffusion.md) for details.
 
 ### Full Evaluation
 
@@ -386,7 +386,7 @@ Edge KL ranges from **0.19 to 0.32** across seeds — a 1.7x difference from the
 num_samples: 1000        # Total samples to generate per seed
 sampling_steps: 100      # Denoising steps per sample
 temperature: 0.0         # 0 = argmax, >0 = stochastic
-unmasking_mode: random   # "random" (MDLM) or "confidence" (LLaDA-style)
+unmasking_mode: random   # "random" (MDLM) or "llada" (LLaDA-style)
 metrics: [validity, novelty, diversity, distribution_match, conditional_edge_kl, graph_structure_mmd, spatial_transitivity, type_conditioned_degree_kl, mode_coverage]
 checkpoint_path: null     # Required: set via CLI
 batch_size: 64           # Samples per generation batch

@@ -404,17 +404,17 @@ class TestAdversarialSampling:
 # =========================================================================
 
 
-class TestConfidenceUnmasking:
-    """Tests for unmasking_mode='confidence'."""
+class TestLLaDAUnmasking:
+    """Tests for unmasking_mode='llada'."""
 
     def test_confidence_no_mask_in_output(
         self, dummy_model, linear_schedule, vocab_config
     ):
-        """Confidence mode produces no MASK tokens in final output."""
+        """LLaDA mode produces no MASK tokens in final output."""
         result = sample(
             dummy_model, linear_schedule, vocab_config,
             batch_size=4, num_steps=10, fixed_num_rooms=8,
-            unmasking_mode="confidence",
+            unmasking_mode="llada",
         )
         assert (result[:, : vocab_config.n_max] != NODE_MASK_IDX).all()
         assert (result[:, vocab_config.n_max :] != EDGE_MASK_IDX).all()
@@ -422,11 +422,11 @@ class TestConfidenceUnmasking:
     def test_confidence_pad_preserved(
         self, dummy_model, linear_schedule, vocab_config
     ):
-        """PAD positions remain PAD in confidence mode."""
+        """PAD positions remain PAD in LLaDA mode."""
         result = sample(
             dummy_model, linear_schedule, vocab_config,
             batch_size=4, num_steps=10, fixed_num_rooms=3,
-            unmasking_mode="confidence",
+            unmasking_mode="llada",
         )
         n_max = vocab_config.n_max
         assert (result[:, 3:n_max] == NODE_PAD_IDX).all()
@@ -441,7 +441,7 @@ class TestConfidenceUnmasking:
         result = sample(
             dummy_model, linear_schedule, vocab_config,
             batch_size=4, num_steps=5, fixed_num_rooms=4,
-            unmasking_mode="confidence",
+            unmasking_mode="llada",
         )
         assert result.shape == (4, vocab_config.seq_len)
         assert result.dtype == torch.long
@@ -476,11 +476,11 @@ class TestConfidenceUnmasking:
     def test_confidence_single_step(
         self, dummy_model, linear_schedule, vocab_config
     ):
-        """Single step with confidence mode still clears all masks."""
+        """Single step with LLaDA mode still clears all masks."""
         result = sample(
             dummy_model, linear_schedule, vocab_config,
             batch_size=4, num_steps=1, fixed_num_rooms=8,
-            unmasking_mode="confidence",
+            unmasking_mode="llada",
         )
         assert (result[:, : vocab_config.n_max] != NODE_MASK_IDX).all()
         assert (result[:, vocab_config.n_max :] != EDGE_MASK_IDX).all()
