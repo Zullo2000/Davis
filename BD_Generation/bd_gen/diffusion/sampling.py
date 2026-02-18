@@ -117,8 +117,10 @@ def sample(
             (for inpainting). Used together with fixed_mask.
         fixed_mask: (B, SEQ_LEN) bool tensor. True = position is fixed
             (clamp to fixed_tokens after each step).
-        remasking_fn: Optional callable(x_t, t) -> x_t_remasked.
-            For ReMDM inference. Applied after each unmasking step.
+        remasking_fn: Optional callable(x_t, t_now, t_next, pad_mask) ->
+            x_t_remasked. For ReMDM inference. Applied after each
+            unmasking step. Not called at the final step (i=0) to ensure
+            all tokens are decoded.
         num_rooms_distribution: (n_max,) float32 histogram. Index k =
             P(k+1 rooms). If None, uniform over [1, n_max].
         fixed_num_rooms: If given, all samples have this many rooms.
@@ -270,8 +272,9 @@ def sample(
             x_t = torch.where(fixed_mask, fixed_tokens.to(device), x_t)
 
         # 4j. Apply remasking if provided (ReMDM)
-        if remasking_fn is not None:
-            x_t = remasking_fn(x_t, t_next)
+        # Skip at last step (i=0): must finalize all tokens.
+        if remasking_fn is not None and i > 0:
+            x_t = remasking_fn(x_t, t_now, t_next, pad_mask)
 
     # --- Step 5: Final cleanup (safety net) ---
     # With SUBS zero masking probabilities enforced in the denoiser (MASK/PAD

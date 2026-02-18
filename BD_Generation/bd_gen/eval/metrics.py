@@ -99,28 +99,44 @@ def distribution_match(
         Dict with ``node_kl``, ``edge_kl``, ``num_rooms_kl`` (floats >= 0).
         Returns all zeros if either input is empty.
     """
+    zeros = {
+        "node_kl": 0.0, "edge_kl": 0.0, "num_rooms_kl": 0.0,
+        "node_js": 0.0, "edge_js": 0.0,
+        "node_tv": 0.0, "edge_tv": 0.0,
+        "rooms_w1": 0.0,
+    }
     if not samples or not training_set:
-        return {"node_kl": 0.0, "edge_kl": 0.0, "num_rooms_kl": 0.0}
+        return zeros
 
     # Node type histograms
     sample_node_hist = _node_histogram(samples)
     train_node_hist = _node_histogram(training_set)
     node_kl = _kl_divergence(sample_node_hist, train_node_hist)
+    node_js = _js_divergence(sample_node_hist, train_node_hist)
+    node_tv = _total_variation(sample_node_hist, train_node_hist)
 
     # Edge type histograms (spatial relationships only, indices 0-9)
     sample_edge_hist = _edge_histogram(samples)
     train_edge_hist = _edge_histogram(training_set)
     edge_kl = _kl_divergence(sample_edge_hist, train_edge_hist)
+    edge_js = _js_divergence(sample_edge_hist, train_edge_hist)
+    edge_tv = _total_variation(sample_edge_hist, train_edge_hist)
 
     # Num rooms histograms
     sample_rooms_hist = _num_rooms_histogram(samples)
     train_rooms_hist = _num_rooms_histogram(training_set)
     num_rooms_kl = _kl_divergence(sample_rooms_hist, train_rooms_hist)
+    rooms_w1 = _wasserstein1_1d_discrete(sample_rooms_hist, train_rooms_hist)
 
     return {
         "node_kl": node_kl,
         "edge_kl": edge_kl,
         "num_rooms_kl": num_rooms_kl,
+        "node_js": node_js,
+        "edge_js": edge_js,
+        "node_tv": node_tv,
+        "edge_tv": edge_tv,
+        "rooms_w1": rooms_w1,
     }
 
 
@@ -160,6 +176,10 @@ def conditional_edge_kl(
     zeros = {
         "conditional_edge_kl_mean": 0.0,
         "conditional_edge_kl_weighted": 0.0,
+        "conditional_edge_js_mean": 0.0,
+        "conditional_edge_js_weighted": 0.0,
+        "conditional_edge_tv_mean": 0.0,
+        "conditional_edge_tv_weighted": 0.0,
         "num_pairs_evaluated": 0.0,
     }
     if not samples or not training_set:
@@ -181,6 +201,8 @@ def conditional_edge_kl(
     uniform = [1.0 / n_rel] * n_rel
 
     kl_values: list[float] = []
+    js_values: list[float] = []
+    tv_values: list[float] = []
     weights: list[float] = []
 
     for pair in eligible_pairs:
@@ -188,17 +210,110 @@ def conditional_edge_kl(
         # Uniform fallback when pair has no sample edges (avoids false KL=0)
         sample_hist = sample_hists.get(pair, uniform)
 
-        kl = _kl_divergence(sample_hist, train_hist)
-        kl_values.append(kl)
+        kl_values.append(_kl_divergence(sample_hist, train_hist))
+        js_values.append(_js_divergence(sample_hist, train_hist))
+        tv_values.append(_total_variation(sample_hist, train_hist))
         weights.append(train_counts[pair] / total_train_edges)
 
     n = len(kl_values)
-    mean_kl = sum(kl_values) / n
-    weighted_kl = sum(w * kl for w, kl in zip(weights, kl_values))
-
     return {
-        "conditional_edge_kl_mean": mean_kl,
-        "conditional_edge_kl_weighted": weighted_kl,
+        "conditional_edge_kl_mean": sum(kl_values) / n,
+        "conditional_edge_kl_weighted": sum(
+            w * v for w, v in zip(weights, kl_values)
+        ),
+        "conditional_edge_js_mean": sum(js_values) / n,
+        "conditional_edge_js_weighted": sum(
+            w * v for w, v in zip(weights, js_values)
+        ),
+        "conditional_edge_tv_mean": sum(tv_values) / n,
+        "conditional_edge_tv_weighted": sum(
+            w * v for w, v in zip(weights, tv_values)
+        ),
+        "num_pairs_evaluated": float(n),
+    }
+
+
+def conditional_edge_distances_topN(
+    samples: list[dict],
+    training_set: list[dict],
+    *,
+    top_n: int = 20,
+    min_pair_count: int = 5,
+) -> dict[str, float]:
+    """KL/JS/TV of edge types for the top-N most frequent canonical pairs.
+
+    Selects the *top_n* most frequent canonical room-type pairs in the
+    **training set** (by edge count) and computes per-pair KL, JS, and TV.
+    Using only high-frequency pairs gives more stable estimates across runs.
+
+    Args:
+        samples: Generated graph dicts.
+        training_set: Training graph dicts.
+        top_n: Number of top pairs to evaluate.
+        min_pair_count: Minimum training edges per pair (applied before
+            top-N selection).
+
+    Returns:
+        Dict with mean/weighted KL/JS/TV, ``topN`` used, and
+        ``num_pairs_evaluated``.
+    """
+    zeros = {
+        "conditional_edge_kl_topN_mean": 0.0,
+        "conditional_edge_kl_topN_weighted": 0.0,
+        "conditional_edge_js_topN_mean": 0.0,
+        "conditional_edge_js_topN_weighted": 0.0,
+        "conditional_edge_tv_topN_mean": 0.0,
+        "conditional_edge_tv_topN_weighted": 0.0,
+        "topN": float(top_n),
+        "num_pairs_evaluated": 0.0,
+    }
+    if not samples or not training_set:
+        return zeros
+
+    train_hists, train_counts = _conditional_edge_histogram(training_set)
+    sample_hists, _ = _conditional_edge_histogram(samples)
+
+    eligible = [
+        (pair, count) for pair, count in train_counts.items()
+        if count >= min_pair_count
+    ]
+    eligible.sort(key=lambda x: x[1], reverse=True)
+    top_pairs = [pair for pair, _ in eligible[:top_n]]
+    if not top_pairs:
+        return zeros
+
+    total_train_edges = sum(train_counts[p] for p in top_pairs)
+    n_rel = len(EDGE_TYPES)
+    uniform = [1.0 / n_rel] * n_rel
+
+    kl_values: list[float] = []
+    js_values: list[float] = []
+    tv_values: list[float] = []
+    weights: list[float] = []
+
+    for pair in top_pairs:
+        train_hist = train_hists[pair]
+        sample_hist = sample_hists.get(pair, uniform)
+        kl_values.append(_kl_divergence(sample_hist, train_hist))
+        js_values.append(_js_divergence(sample_hist, train_hist))
+        tv_values.append(_total_variation(sample_hist, train_hist))
+        weights.append(train_counts[pair] / total_train_edges)
+
+    n = len(kl_values)
+    return {
+        "conditional_edge_kl_topN_mean": sum(kl_values) / n,
+        "conditional_edge_kl_topN_weighted": sum(
+            w * v for w, v in zip(weights, kl_values)
+        ),
+        "conditional_edge_js_topN_mean": sum(js_values) / n,
+        "conditional_edge_js_topN_weighted": sum(
+            w * v for w, v in zip(weights, js_values)
+        ),
+        "conditional_edge_tv_topN_mean": sum(tv_values) / n,
+        "conditional_edge_tv_topN_weighted": sum(
+            w * v for w, v in zip(weights, tv_values)
+        ),
+        "topN": float(top_n),
         "num_pairs_evaluated": float(n),
     }
 
@@ -396,6 +511,10 @@ def type_conditioned_degree_kl(
     zeros = {
         "degree_kl_per_type_mean": 0.0,
         "degree_kl_per_type_weighted": 0.0,
+        "degree_js_per_type_mean": 0.0,
+        "degree_js_per_type_weighted": 0.0,
+        "degree_tv_per_type_mean": 0.0,
+        "degree_tv_per_type_weighted": 0.0,
         "num_types_evaluated": 0.0,
     }
     if not samples or not reference:
@@ -414,20 +533,31 @@ def type_conditioned_degree_kl(
     uniform = [1.0 / n_max] * n_max
 
     kl_values: list[float] = []
+    js_values: list[float] = []
+    tv_values: list[float] = []
     weights: list[float] = []
 
     for room_type in eligible_types:
         ref_hist = ref_hists[room_type]
         sample_hist = sample_hists.get(room_type, uniform)
-        kl = _kl_divergence(sample_hist, ref_hist)
-        kl_values.append(kl)
+        kl_values.append(_kl_divergence(sample_hist, ref_hist))
+        js_values.append(_js_divergence(sample_hist, ref_hist))
+        tv_values.append(_total_variation(sample_hist, ref_hist))
         weights.append(ref_counts[room_type] / total_ref_nodes)
 
     n = len(kl_values)
     return {
         "degree_kl_per_type_mean": sum(kl_values) / n,
         "degree_kl_per_type_weighted": sum(
-            w * kl for w, kl in zip(weights, kl_values)
+            w * v for w, v in zip(weights, kl_values)
+        ),
+        "degree_js_per_type_mean": sum(js_values) / n,
+        "degree_js_per_type_weighted": sum(
+            w * v for w, v in zip(weights, js_values)
+        ),
+        "degree_tv_per_type_mean": sum(tv_values) / n,
+        "degree_tv_per_type_weighted": sum(
+            w * v for w, v in zip(weights, tv_values)
         ),
         "num_types_evaluated": float(n),
     }
@@ -499,6 +629,96 @@ def mode_coverage(
         "num_training_modes": float(n_train_modes),
         "num_sample_modes": float(len(sample_archetypes)),
     }
+
+
+def validity_by_num_rooms(
+    validity_results: list[dict],
+    graph_dicts: list[dict],
+) -> dict[str, dict[str, float]]:
+    """Validity rates stratified by num_rooms.
+
+    Args:
+        validity_results: List of dicts from ``check_validity_batch``.
+        graph_dicts: Corresponding detokenized graph dicts (same order).
+
+    Returns:
+        Dict mapping str(num_rooms) to a dict of check-name -> rate.
+    """
+    if not validity_results or not graph_dicts:
+        return {}
+
+    groups: dict[int, list[dict]] = defaultdict(list)
+    for vr, gd in zip(validity_results, graph_dicts):
+        nr = gd.get("num_rooms", 0)
+        groups[nr].append(vr)
+
+    result: dict[str, dict[str, float]] = {}
+    for nr in sorted(groups):
+        items = groups[nr]
+        n = len(items)
+        checks: dict[str, float] = {}
+        # Get all boolean keys from first item
+        for key in items[0]:
+            if isinstance(items[0][key], bool):
+                checks[key] = sum(1 for r in items if r[key]) / n
+        result[str(nr)] = checks
+
+    return result
+
+
+def spatial_transitivity_by_num_rooms(
+    graph_dicts: list[dict],
+) -> dict[str, dict[str, float]]:
+    """Spatial transitivity stratified by num_rooms.
+
+    Groups graphs by ``num_rooms`` and runs :func:`spatial_transitivity`
+    on each group.
+
+    Returns:
+        Dict mapping str(num_rooms) to transitivity result dict.
+    """
+    if not graph_dicts:
+        return {}
+
+    groups: dict[int, list[dict]] = defaultdict(list)
+    for gd in graph_dicts:
+        groups[gd.get("num_rooms", 0)].append(gd)
+
+    result: dict[str, dict[str, float]] = {}
+    for nr in sorted(groups):
+        result[str(nr)] = spatial_transitivity(groups[nr])
+
+    return result
+
+
+def edge_present_rate_by_num_rooms(
+    graph_dicts: list[dict],
+) -> dict[str, float]:
+    """Mean edge-present rate stratified by num_rooms.
+
+    Edge-present rate per graph = E_present / E_possible, where
+    E_possible = n*(n-1)/2 and E_present = len(edge_triples).
+
+    Returns:
+        Dict mapping str(num_rooms) to mean edge-present rate.
+    """
+    if not graph_dicts:
+        return {}
+
+    groups: dict[int, list[float]] = defaultdict(list)
+    for gd in graph_dicts:
+        n = gd.get("num_rooms", 0)
+        e_possible = n * (n - 1) / 2
+        e_present = len(gd.get("edge_triples", []))
+        rate = e_present / e_possible if e_possible > 0 else 0.0
+        groups[n].append(rate)
+
+    result: dict[str, float] = {}
+    for nr in sorted(groups):
+        rates = groups[nr]
+        result[str(nr)] = sum(rates) / len(rates)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +805,65 @@ def _kl_divergence(p: list[float], q: list[float]) -> float:
             kl += pi * math.log(pi / (qi + eps))
 
     return kl
+
+
+def _total_variation(p: list[float], q: list[float]) -> float:
+    """Total Variation distance: TV(p, q) = 0.5 * sum_k |p_k - q_k|.
+
+    Handles different-length inputs by zero-padding the shorter one.
+    """
+    max_len = max(len(p), len(q))
+    tv = 0.0
+    for i in range(max_len):
+        pi = p[i] if i < len(p) else 0.0
+        qi = q[i] if i < len(q) else 0.0
+        tv += abs(pi - qi)
+    return 0.5 * tv
+
+
+def _js_divergence(p: list[float], q: list[float]) -> float:
+    """Jensen-Shannon divergence (in nats).
+
+    JS(p, q) = 0.5 * KL(p || m) + 0.5 * KL(q || m) where m = 0.5*(p+q).
+
+    No epsilon smoothing needed: if p_k > 0 then m_k >= 0.5*p_k > 0,
+    so log(p_k / m_k) is always safe.  Convention: 0 * log(0/x) = 0.
+
+    Handles different-length inputs by zero-padding the shorter one.
+    """
+    max_len = max(len(p), len(q))
+    kl_pm = 0.0
+    kl_qm = 0.0
+    for i in range(max_len):
+        pi = p[i] if i < len(p) else 0.0
+        qi = q[i] if i < len(q) else 0.0
+        mi = 0.5 * (pi + qi)
+        if pi > 0 and mi > 0:
+            kl_pm += pi * math.log(pi / mi)
+        if qi > 0 and mi > 0:
+            kl_qm += qi * math.log(qi / mi)
+    return 0.5 * kl_pm + 0.5 * kl_qm
+
+
+def _wasserstein1_1d_discrete(p: list[float], q: list[float]) -> float:
+    """Wasserstein-1 distance for 1D discrete distributions with unit spacing.
+
+    W1(p, q) = sum_k |CDF_p(k) - CDF_q(k)|.
+
+    Meaningful for ordinal variables (e.g. num_rooms) where being
+    "one bin off" should cost less than "four bins off".
+
+    Handles different-length inputs by zero-padding the shorter one.
+    """
+    max_len = max(len(p), len(q))
+    cdf_p = 0.0
+    cdf_q = 0.0
+    w1 = 0.0
+    for i in range(max_len):
+        cdf_p += p[i] if i < len(p) else 0.0
+        cdf_q += q[i] if i < len(q) else 0.0
+        w1 += abs(cdf_p - cdf_q)
+    return w1
 
 
 def _canonicalize_edge(

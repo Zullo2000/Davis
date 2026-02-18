@@ -7,8 +7,8 @@
 
 ## Overall Status
 - Current phase: All phases complete (v1 pipeline) + post-v1 enhancements
-- Last completed: Phase 5
-- Post-v1: Confidence-based unmasking mode added to sampling (BichraiX); SUBS zero masking probabilities added to denoiser; float64 numerical stability fix (arXiv:2409.02908)
+- Last completed: Phase 5 + Eval Upgrade + Systematic Comparison
+- Post-v1: Confidence-based unmasking mode added to sampling (BichraiX); SUBS zero masking probabilities added to denoiser; float64 numerical stability fix (arXiv:2409.02908); ReMDM remasking (cap strategy); Evaluation upgrade (JS/TV/W1, multi-seed, denoising eval, stratified drill-down); Systematic comparison infrastructure (V2 JSON, compare.py)
 - Spec corrections: vocab.py NODE_TYPES/EDGE_TYPES name-to-index mappings corrected (Phase 1 Step 0); loss_mask formula corrected (Phase 3)
 
 ## Phase 0 — Scaffold
@@ -327,3 +327,174 @@ Added `torch.isfinite(param.grad).all()` assertion to `test_full_train_step` in 
 - EMA: unchanged (disabled, deferred per spec)
 - Model architecture: unchanged
 - Optimizer: unchanged (AdamW, weight_decay=0.01, grad_clip=1.0)
+
+---
+
+## Post-v1 — ReMDM Remasking (Inference-Time Scaling)
+Status: COMPLETE
+
+### Summary
+Implemented ReMDM-cap remasking (arXiv:2503.00307) as an inference-only
+enhancement. Previously decoded tokens can now be stochastically re-masked
+during sampling, enabling error correction without retraining. At each
+denoising step, already-decoded positions are re-masked with probability
+sigma_t = min(eta, (1 - alpha_s) / alpha_t), then re-predicted in subsequent
+steps with richer context.
+
+### Files created/modified (6 new, 4 modified)
+- `bd_gen/diffusion/remasking.py` — NEW: RemaskingSchedule callable class
+  (cap + rescale strategies), create_remasking_schedule() factory function
+- `eval_results/save_utils.py` — NEW: structured JSON save/load helpers
+  for evaluation comparison across methods
+- `tests/test_remasking.py` — NEW: 19 tests (PAD protection stress test,
+  correct MASK token per position type, sigma formulas for both strategies,
+  last-step guard, integration with sample())
+- `eval_results/comparison.md` — NEW: side-by-side metrics table
+  (MDLM baseline vs ReMDM-cap)
+- `eval_results/mdlm_baseline.json` — NEW: baseline evaluation results
+  (seed=42, 1000 samples, 100 steps)
+- `eval_results/remdm_cap_eta0.1.json` — NEW: remasking evaluation results
+  (same config + eta=0.1)
+- `bd_gen/diffusion/sampling.py` — MODIFIED: remasking hook signature
+  expanded from (x_t, t) to (x_t, t_now, t_next, pad_mask); added i>0
+  guard to skip remasking at the final denoising step
+- `bd_gen/diffusion/__init__.py` — MODIFIED: exports RemaskingSchedule,
+  create_remasking_schedule
+- `scripts/evaluate.py` — MODIFIED: wires remasking config from Hydra,
+  constructs RemaskingSchedule, saves structured JSON with method metadata
+- `configs/eval/default.yaml` — MODIFIED: added unmasking_mode field and
+  nested remasking section (enabled, strategy, eta)
+
+### Key decisions
+- **Post-hoc remasking** (not full ReMDM two-distribution posterior):
+  simpler, captures the key error-correction benefit, extensible to full
+  formulation later. The full ReMDM uses separate distributions for masked
+  vs unmasked positions; our approach applies standard MDLM unmasking then
+  stochastically re-masks some decoded positions.
+- **Hook signature change** from (x_t, t) to (x_t, t_now, t_next, pad_mask):
+  required for sigma_t computation (needs both alpha_t and alpha_s) and
+  PAD protection (the most critical invariant in the codebase).
+- **i > 0 guard**: remasking is NOT applied at the final step (i=0), ensuring
+  all tokens are finalized. Without this, remasked positions would remain
+  as MASK in the output.
+- **sigma_t in float64**: follows the same numerical stability pattern as
+  p_unmask computation (arXiv:2409.02908 fix).
+- **Default eta=0.1 for cap strategy**: recommended value from ReMDM paper,
+  balances error correction vs sampling efficiency.
+- **eval_results/ directory**: JSON per run for machine-readable comparison,
+  markdown table for human-readable documentation.
+
+### Deviations from spec
+- Changed remasking_fn hook signature in sampling.py from 2-arg to 4-arg.
+  The original spec (planning_T1.md Section 5.3 and Appendix A) defined
+  `remasking_fn(x_t, t)` but this is insufficient — sigma_t computation
+  requires both t_now and t_next, and PAD protection requires pad_mask.
+  Spec updated accordingly.
+
+### Evaluation results
+See eval_results/comparison.md for full side-by-side metrics table.
+Key findings (seed=42, 1000 samples, 100 steps, cap strategy, eta=0.1):
+- Validity: 99.5% → 98.5% (-1.0%)
+- Diversity: 0.977 → 0.993 (+0.016)
+- Novelty: 0.943 → 0.976 (+0.033)
+- Mode coverage (unweighted): 7.5% → 11.5% (+3.9%)
+- Unique archetypes: 62 → 126 (2x improvement)
+- Conditional edge KL (weighted): 0.4253 → 0.3975 (-0.028, better)
+- Rooms KL: 0.0065 → 0.0011 (-0.005, better)
+ReMDM trades ~1% validity for substantially improved diversity and mode
+coverage. The 2x archetype count suggests the baseline suffers from some
+mode collapse that remasking alleviates.
+
+## Post-v1 — Evaluation Infrastructure Upgrade
+Status: COMPLETE
+
+### Summary
+Comprehensive evaluation upgrade to make MDLM vs ReMDM comparisons
+statistically sound. Adds JS/TV/W1 distance metrics, multi-seed evaluation
+with mean/std aggregation, sampler-independent denoising evaluation, and
+stratified drill-down metrics by num_rooms.
+
+### Files created (3 new)
+- `bd_gen/eval/denoising_eval.py` — denoising_eval() + denoising_val_elbo()
+- `tests/test_denoising_eval.py` — 4 tests (keys, accuracy, PAD exclusion, max_batches)
+- `docs/denoising_eval.md` — module documentation
+
+### Files modified (5)
+- `bd_gen/eval/metrics.py` — Added: _total_variation(), _js_divergence(),
+  _wasserstein1_1d_discrete(), conditional_edge_distances_topN(),
+  validity_by_num_rooms(), spatial_transitivity_by_num_rooms(),
+  edge_present_rate_by_num_rooms(). Extended: distribution_match (JS/TV/W1
+  keys), conditional_edge_kl (JS/TV keys), type_conditioned_degree_kl
+  (JS/TV keys).
+- `bd_gen/eval/__init__.py` — Added exports for all new functions
+- `scripts/evaluate.py` — Refactored: _generate_and_evaluate_single_seed(),
+  _aggregate_multi_seed(), _prefix_metrics(), multi-seed loop, denoising
+  eval integration, stratified metrics, scoreboard prefixes
+- `configs/eval/default.yaml` — Added: seeds, conditional_topN_pairs,
+  stratified, run_denoising_eval, denoising_t_grid, denoising_max_batches
+- `tests/test_metrics.py` — Added: TestTotalVariation (5), TestJSDivergence
+  (6), TestWasserstein1 (5), TestConditionalEdgeDistancesTopN (4),
+  TestValidityByNumRooms (2), TestSpatialTransitivityByNumRooms (2),
+  TestEdgePresentRateByNumRooms (3), TestAggregateMultiSeed (3), plus
+  additional JS/TV tests for distribution_match, conditional_edge_kl,
+  type_conditioned_degree_kl
+- `docs/evaluation.md` — Updated: architecture diagram, metrics table,
+  new sections for JS/TV/W1, denoising eval, multi-seed, stratified,
+  scoreboard prefixes, config reference
+
+### Key decisions
+- JS divergence uses 0*log(0/x)=0 convention (no epsilon smoothing needed)
+- KL retained as diagnostic alongside JS/TV (backward compatible, additive only)
+- W1 used only for num_rooms (ordinal; JS/TV for categorical distributions)
+- Multi-seed: mean +/- std over 5 seeds [42, 123, 456, 789, 1337]; no bootstrap
+- Denoising eval runs once (seed-independent); only sampler quality varies per seed
+- Stratified metrics: validity, transitivity, edge-present rate by num_rooms only
+- Exact key-set test assertions changed to issubset (forward-compatible)
+- Scoreboard prefix mapping: denoise/*, sampler/validity/*, sampler/coverage/*,
+  sampler/distribution/*, sampler/structure/*, sampler/conditional/*
+
+## Post-v1 — Systematic Comparison Infrastructure
+Status: COMPLETE
+
+### Summary
+Built a structured results pipeline for reproducible, multi-method comparison.
+V2 JSON format stores per-seed data + summary statistics + denoising metrics.
+Auto-generated comparison tables with metric family grouping.
+
+### Files created (3 new)
+- `eval_results/save_utils.py` — V2 JSON format with `{format_version,
+  per_seed, summary, denoising}`, backward-compatible V1 auto-upgrade,
+  `build_comparison_table()` with metric family grouping (Validity, Coverage,
+  Distribution, Structure, Conditional, Denoising)
+- `scripts/compare.py` — CLI utility that auto-discovers `eval_results/*.json`
+  and generates `eval_results/comparison.md`
+- `tests/test_save_utils.py` — 20 tests (V2 roundtrip, V1 upgrade,
+  formatting, table generation)
+
+### Files modified (1)
+- `scripts/evaluate.py` (lines 508-528) — `save_eval_result()` now receives
+  structured multi-seed data (`per_seed_metrics`, `summary_metrics`,
+  `denoising_metrics`) instead of `flat_metrics`
+
+### Evaluations run
+- MDLM baseline: 5 seeds x 1000 samples x 100 steps (V2 JSON)
+- ReMDM-cap eta=0.1: 5 seeds x 1000 samples x 100 steps (V2 JSON)
+- Auto-generated `eval_results/comparison.md` with 7 sections, mean +/- std
+
+### Key decisions
+- V2 format with `format_version: 2` field enables backward-compatible V1
+  auto-upgrade (V1 files get `std: 0.0` + `_upgraded_from_v1` flag)
+- Unicode avoidance: `+/-` instead of special characters (Windows console)
+- Metric family registry: hardcoded list of `(key, display_name, is_pct,
+  is_diagnostic)` tuples for consistent table structure
+- Integer formatting: `mean == int(mean)` check for clean display
+- KL marked as `(diag.)` in table, hideable with `--primary-only`
+
+### Key findings (5-seed mean +/- std)
+- ReMDM-cap eta=0.1 vs MDLM baseline:
+  - Validity: 99.3% → 98.8% (-0.5%, within noise)
+  - Diversity: 0.976 → 0.991 (+0.015)
+  - Unique archetypes: 77 → 120 (+55%)
+  - Cond. edge JS (weighted): 0.083 → 0.075 (-10%, better)
+  - Type-cond. degree JS (weighted): 0.048 → 0.069 (+44%, worse)
+  - Denoising metrics nearly identical (confirms sampler-only difference)

@@ -330,10 +330,10 @@ class TestGuidanceAndInpainting:
     def test_remasking_fn_called(
         self, dummy_model, linear_schedule, vocab_config
     ):
-        """A remasking_fn that tracks calls is invoked at each step."""
+        """A remasking_fn that tracks calls is invoked at each step except the last."""
         call_count = [0]
 
-        def tracking_remasking(x_t, t):
+        def tracking_remasking(x_t, t_now, t_next, pad_mask):
             call_count[0] += 1
             return x_t
 
@@ -343,7 +343,8 @@ class TestGuidanceAndInpainting:
             batch_size=2, num_steps=num_steps, fixed_num_rooms=4,
             remasking_fn=tracking_remasking,
         )
-        assert call_count[0] == num_steps
+        # Remasking is skipped at the last step (i=0) to finalize tokens
+        assert call_count[0] == num_steps - 1
 
 
 # =========================================================================

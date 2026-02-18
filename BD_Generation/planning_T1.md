@@ -716,7 +716,7 @@ def sample(
     guidance_fn: Callable | None = None,         # signature: (logits, x_t, t, pad_mask, **kwargs) → logits
     fixed_tokens: Tensor | None = None,
     fixed_mask: Tensor | None = None,
-    remasking_fn: Callable | None = None,        # signature: (x_t, t) → x_t_remasked; None = standard MDLM
+    remasking_fn: Callable | None = None,        # signature: (x_t, t_now, t_next, pad_mask) → x_t_remasked; None = standard MDLM
     num_rooms_distribution: Tensor | None = None, # (vocab_config.n_max,) histogram; None = uniform over [1, n_max]
     fixed_num_rooms: int | None = None,           # override: use this value for all samples
     device: str = "cpu"
@@ -1326,14 +1326,24 @@ This implementation framework is designed from the start to support future exten
 | Future capability | Current hook | Where it lives | Concrete interface |
 |---|---|---|---|
 | **Conditioned generation** (house boundary features) | `BDDenoiser.forward(... condition=None)` | `bd_gen/model/denoiser.py` | v2: `condition: Tensor(B, n_cond_tokens, d_cond)`. Integration via cross-attention layers in transformer blocks (no-op when `None`). The transformer blocks should be structured so that adding cross-attention is a parameter change, not a rewrite. |
-| **Guidance** (classifier-free, training-free) | `guidance_fn` — pluggable function injected at each denoising step | `bd_gen/diffusion/sampling.py` | Signature: `guidance_fn(logits, x_t, t, pad_mask, **kwargs) → modified_logits`. The `pad_mask` tells guidance which positions are real. `**kwargs` allows passing noise_schedule, model, or other context for training-free guidance (arXiv:2409.07359). |
-| **Constrained generation / inpainting** | `fixed_tokens` + binary mask — clamped positions stay fixed throughout reverse trajectory | `bd_gen/diffusion/sampling.py` | Already implemented in v1 interface. |
-| **Joint BD+RFP co-generation** | Separate embedding tables (swappable for continuous geometry embeddings) and classification heads in `denoiser.py` (extensible with a geometry head) | `bd_gen/model/embeddings.py`, `bd_gen/model/denoiser.py` | The embedding layer is modular. A continuous geometry embedding branch can be added alongside the discrete node/edge embeddings. |
-| **ReMDM inference** | `remasking_fn(x_t, t) → x_t_remasked` — optional parameter in sampling loop | `bd_gen/diffusion/sampling.py` | `None` = standard MDLM (no remasking). For ReMDM: implements remasking schedule sigma_t. Called after unmasking at each step. No retraining needed — train with standard MDLM, apply ReMDM at inference only. |
-| **Per-element noise schedules** (MELD-style) | `forward_process.py` accepts `pad_mask` per-position | `bd_gen/diffusion/forward_process.py` | If uniform masking proves insufficient (state-clashing problem, see MELD paper), extend forward process to accept `alpha_t_per_position: (B, SEQ_LEN)` instead of scalar `alpha_t`. The per-position `pad_mask` interface already establishes this pattern. |
-| **New noise schedules** | Factory pattern `get_noise(config)` — add a new YAML config + schedule class, no other code changes | `bd_gen/diffusion/noise_schedule.py`, `configs/noise/` | Implement `NoiseSchedule` interface (sigma, alpha, alpha_prime, optionally importance_sampling_transformation). |
+| **Constrained generation via guidance** | `guidance_fn` + `fixed_tokens`/`fixed_mask` | `bd_gen/diffusion/sampling.py` | Combine training-free guidance (Nisonoff et al., arXiv:2409.07359, repo: `github.com/nisonoff/discrete_guidance`) with inpainting constraints. `guidance_fn(logits, x_t, t, pad_mask, **kwargs) → modified_logits` steers generation toward target properties (e.g., room count, connectivity) while `fixed_tokens` clamps known positions. No retraining required. |
+| **ReMDM max-capped remasking** | `remasking_fn(x_t, t_now, t_next, pad_mask)` | `bd_gen/diffusion/sampling.py`, `bd_gen/diffusion/remasking.py` | **Implemented.** `RemaskingSchedule` with cap strategy + eta=0.1 (Shi et al., arXiv:2503.00307, repo: `github.com/liuqidong07/ReMDM`). Next: eta sweep [0.1, 0.2, 0.3, 0.4, 0.5] to find optimal validity/diversity tradeoff. Rescale strategy also available. No retraining required. |
+| **ReMDM confidence-based remasking** | `remasking_fn` + `unmasking_mode="confidence"` | `bd_gen/diffusion/sampling.py`, `bd_gen/diffusion/remasking.py` | Combine confidence-based unmasking (already implemented, inspired by LLaDA — Nie et al., arXiv:2502.09992) with remasking. Unmask highest-confidence positions first, then stochastically re-mask low-confidence decoded tokens. No retraining required. |
+| **MELD — learned forward process** | `forward_process.py` per-position masking | `bd_gen/diffusion/forward_process.py`, `bd_gen/diffusion/noise_schedule.py` | Learn per-element noise schedules to avoid state-clashing in edges (Sahoo et al., arXiv:2410.02940, repo: `github.com/kuleshov-group/meld`). Edge positions that frequently conflict (e.g., symmetric pairs) get different masking rates. Extend `forward_mask` to accept `alpha_t_per_position: (B, SEQ_LEN)` instead of scalar `alpha_t`. **Requires retraining.** |
+| **Joint BD+RFP co-generation** | Separate embedding tables + classification heads | `bd_gen/model/embeddings.py`, `bd_gen/model/denoiser.py` | The embedding layer is modular. A continuous geometry embedding branch can be added alongside the discrete node/edge embeddings. |
+| **New noise schedules** | Factory pattern `get_noise(config)` | `bd_gen/diffusion/noise_schedule.py`, `configs/noise/` | Implement `NoiseSchedule` interface (sigma, alpha, alpha_prime, optionally importance_sampling_transformation). |
 
-None of these extensions require rewriting existing modules — they slot into the interfaces already defined.
+### Post-v1 Experiment Roadmap
+
+All experiments below require the evaluation pipeline to be complete (it is). Listed in recommended order:
+
+1. **ReMDM max-capped eta sweep** — Try eta = [0.1, 0.2, 0.3, 0.4, 0.5] with cap strategy. eta=0.1 already evaluated (see `eval_results/comparison.md`). No retraining. Goal: find the eta that maximizes diversity/mode coverage while keeping validity above 98%.
+
+2. **ReMDM confidence-based remasking** — Combine confidence-based unmasking (`unmasking_mode="confidence"`, already implemented) with the remasking schedule. The hypothesis is that confidence-based unmasking resolves easy positions first, while remasking corrects premature commitments on hard positions. No retraining.
+
+3. **MELD — learned forward process** — Learn per-element noise schedules to address state-clashing in edge positions (Sahoo et al., arXiv:2410.02940). In our representation, symmetric edge pairs (e.g., left-of/right-of) can conflict when masked/unmasked at different rates. MELD learns optimal masking rates per position type. **Requires retraining.**
+
+4. **Constrained generation via guidance** — Use training-free guidance (Nisonoff et al., arXiv:2409.07359) to steer generation toward user-specified constraints (e.g., fixed room count, required room types, adjacency requirements). Combine with `fixed_tokens` for inpainting. No retraining.
 
 ---
 
@@ -1345,3 +1355,7 @@ None of these extensions require rewriting existing modules — they slot into t
 | adaLN-Zero conditioning | DiT (Peebles & Xie, ICCV 2023), repo: `github.com/facebookresearch/DiT` |
 | Evaluation metrics | DiGress (Vignac et al.), repo: `github.com/cvignac/DiGress` |
 | Dataset (RPLAN BDs) | Graph2Plan (Han et al.), repo: `github.com/HanHan55/Graph2plan` |
+| Remasking (inference-time scaling) | ReMDM (Shi et al., arXiv:2503.00307), repo: `github.com/liuqidong07/ReMDM` |
+| Learned forward process | MELD (Sahoo et al., arXiv:2410.02940), repo: `github.com/kuleshov-group/meld` |
+| Training-free guidance | Nisonoff et al. (arXiv:2409.07359), repo: `github.com/nisonoff/discrete_guidance` |
+| Confidence-based unmasking | LLaDA (Nie et al., arXiv:2502.09992), repo: `github.com/ML-GSAI/LLaDA` |

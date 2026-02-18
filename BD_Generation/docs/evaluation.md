@@ -6,15 +6,16 @@ Phase 5 of the BD Generation pipeline. Provides validity checking, generation qu
 
 ```
 bd_gen/eval/
-├── validity.py     # Graph validity checker (connectivity, constraints, sanity)
-└── metrics.py      # Quality metrics (validity rate, novelty, diversity, distribution match)
+├── validity.py         # Graph validity checker (connectivity, constraints, sanity)
+├── metrics.py          # Quality metrics (validity rate, novelty, diversity, distribution match, JS/TV/W1)
+└── denoising_eval.py   # Sampler-independent model quality metrics (accuracy, cross-entropy, ELBO)
 
 bd_gen/viz/
 └── graph_viz.py    # Bubble diagram visualization (networkx + matplotlib)
 
 scripts/
 ├── sample.py       # Generate and visualize samples from checkpoint
-└── evaluate.py     # Full evaluation pipeline with metrics and wandb logging
+└── evaluate.py     # Full evaluation pipeline with multi-seed, metrics, and wandb logging
 ```
 
 ## Validity Checks
@@ -43,13 +44,18 @@ scripts/
 | Validity rate | `validity_rate(results)` | Fraction of samples passing all checks |
 | Diversity | `diversity(graph_dicts)` | Unique graphs / total (hash-based) |
 | Novelty | `novelty(samples, training_set)` | Fraction not in training set (exact match) |
-| Distribution match | `distribution_match(samples, training_set)` | KL divergence of node/edge/num_rooms histograms |
+| Distribution match | `distribution_match(samples, training_set)` | KL/JS/TV/W1 of node/edge/num_rooms histograms |
 | Per-class accuracy | `per_class_accuracy(preds, targets, mask)` | Training-time accuracy per class |
-| Conditional edge KL | `conditional_edge_kl(samples, training_set)` | KL divergence of edge types conditioned on room-type pair |
+| Conditional edge KL/JS/TV | `conditional_edge_kl(samples, training_set)` | KL/JS/TV of edge types conditioned on room-type pair |
+| Conditional edge top-N | `conditional_edge_distances_topN(samples, training_set)` | KL/JS/TV for top-N most frequent canonical pairs |
 | Graph structure MMD | `graph_structure_mmd(samples, reference)` | MMD on degree, clustering, spectral features |
 | Spatial transitivity | `spatial_transitivity(graph_dicts)` | Fraction of graphs with 2D-consistent spatial relationships |
-| Type-conditioned degree KL | `type_conditioned_degree_kl(samples, reference)` | KL divergence of node degree per room type |
+| Type-conditioned degree KL/JS/TV | `type_conditioned_degree_kl(samples, reference)` | KL/JS/TV of node degree per room type |
 | Mode coverage | `mode_coverage(samples, training_set)` | Fraction of training room-type archetypes covered |
+| Denoising accuracy | `denoising_eval(model, dataloader, ...)` | Sampler-independent accuracy and CE at noise levels |
+| Validity by num_rooms | `validity_by_num_rooms(validity_results, graph_dicts)` | Stratified validity breakdown |
+| Transitivity by num_rooms | `spatial_transitivity_by_num_rooms(graph_dicts)` | Stratified spatial transitivity |
+| Edge-present rate by num_rooms | `edge_present_rate_by_num_rooms(graph_dicts)` | Stratified edge density |
 
 ### Conditional Edge KL
 
@@ -209,6 +215,57 @@ print(f"Training has {int(mc['num_training_modes'])} distinct archetypes")
 print(f"Samples produced {int(mc['num_sample_modes'])} distinct archetypes")
 ```
 
+### JS/TV/W1 Distance Metrics
+
+In addition to KL divergence (retained as a diagnostic), all distribution comparisons now include:
+
+| Distance | Formula | Properties | Used for |
+|----------|---------|------------|----------|
+| **Jensen-Shannon (JS)** | `JS(p,q) = 0.5*KL(p\|\|m) + 0.5*KL(q\|\|m)`, `m=(p+q)/2` | Symmetric, bounded [0, ln(2)], stable on sparse histograms | Node/edge/conditional distributions |
+| **Total Variation (TV)** | `TV(p,q) = 0.5 * sum\|p_k - q_k\|` | No logs, very stable, interpretable as "mass difference" | Node/edge/conditional distributions |
+| **Wasserstein-1 (W1)** | `W1(p,q) = sum\|CDF_p(k) - CDF_q(k)\|` | Respects ordinal structure, penalizes "distance" between bins | num_rooms (ordinal) |
+
+KL remains computed but is no longer the headline distribution metric. JS and TV are preferred for stability; W1 is used specifically for `num_rooms` where bin ordering matters.
+
+### Denoising Evaluation (Model Quality)
+
+`denoising_eval()` and `denoising_val_elbo()` evaluate the denoiser on held-out validation data, independent of the sampling procedure. See [denoising_eval.md](denoising_eval.md) for details.
+
+### Multi-Seed Evaluation
+
+The evaluation pipeline runs generation with multiple seeds (default: `[42, 123, 456, 789, 1337]`) and reports mean +/- std for each scalar metric. This replaces the previous single-seed approach and provides uncertainty quantification without bootstrapping.
+
+Output JSON structure:
+```json
+{
+  "meta": { "checkpoint": "...", "num_samples": 1000, "seeds": [42, 123, 456, 789, 1337] },
+  "per_seed": { "42": {...}, "123": {...}, ... },
+  "summary": { "eval/validity_rate": {"mean": 0.99, "std": 0.005}, ... },
+  "denoising": { "denoise/acc_node@t=0.5": 0.85, ... }
+}
+```
+
+### Stratified Drill-Down Metrics
+
+Three metrics are stratified by `num_rooms`:
+
+1. **Validity by num_rooms** — reveals if validity degrades for larger graphs
+2. **Spatial transitivity by num_rooms** — checks if spatial contradictions increase with complexity
+3. **Edge-present rate by num_rooms** — measures edge density per graph size
+
+### Scoreboard Prefixes (wandb)
+
+Metrics are logged with organized prefixes for wandb grouping:
+
+| Prefix | Category |
+|--------|----------|
+| `denoise/*` | Sampler-independent model quality |
+| `sampler/validity/*` | Validity checks |
+| `sampler/coverage/*` | Diversity, novelty, mode coverage |
+| `sampler/distribution/*` | JS, TV, W1, KL distances |
+| `sampler/structure/*` | MMD, transitivity |
+| `sampler/conditional/*` | Conditional edge distances, degree distances |
+
 ## Visualization
 
 `draw_bubble_diagram(graph_dict)` renders a graph using networkx spring layout:
@@ -326,7 +383,7 @@ Edge KL ranges from **0.19 to 0.32** across seeds — a 1.7x difference from the
 `configs/eval/default.yaml`:
 
 ```yaml
-num_samples: 1000        # Total samples to generate
+num_samples: 1000        # Total samples to generate per seed
 sampling_steps: 100      # Denoising steps per sample
 temperature: 0.0         # 0 = argmax, >0 = stochastic
 unmasking_mode: random   # "random" (MDLM) or "confidence" (LLaDA-style)
@@ -336,6 +393,20 @@ batch_size: 64           # Samples per generation batch
 save_samples: true       # Save tokens to .pt
 visualize: true          # Save visualization grid
 num_viz_samples: 16      # How many to visualize
+remasking:
+  enabled: false
+  strategy: "cap"
+  eta: 0.1
+# Multi-seed
+seeds: [42, 123, 456, 789, 1337]
+# Conditional top-N pairs (null to disable)
+conditional_topN_pairs: 20
+# Stratified drill-down metrics
+stratified: true
+# Denoising eval (model quality)
+run_denoising_eval: true
+denoising_t_grid: [0.1, 0.3, 0.5, 0.7, 0.9]
+denoising_max_batches: 50
 ```
 
 ## Testing

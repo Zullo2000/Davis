@@ -1,9 +1,24 @@
 num_samples: 1000
 sampling_steps: 100
 temperature: 0.0
+unmasking_mode: "random"
 metrics: [validity, novelty, diversity, distribution_match, conditional_edge_kl, graph_structure_mmd, spatial_transitivity, type_conditioned_degree_kl, mode_coverage]
 checkpoint_path: null
 batch_size: 64
 save_samples: true
 visualize: true
 num_viz_samples: 16
+remasking:
+  enabled: false
+  strategy: "cap"
+  eta: 0.1
+# Multi-seed evaluation
+seeds: [42, 123, 456, 789, 1337]
+# Conditional top-N pairs (null to disable)
+conditional_topN_pairs: 20
+# Stratified drill-down metrics by num_rooms
+stratified: true
+# Denoising evaluation (model quality, seed-independent)
+run_denoising_eval: true
+denoising_t_grid: [0.1, 0.3, 0.5, 0.7, 0.9]
+denoising_max_batches: 50

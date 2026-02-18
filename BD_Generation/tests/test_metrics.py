@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
+import math
+
 from bd_gen.eval.metrics import (
     _archetype_hash,
     _canonicalize_edge,
@@ -15,8 +17,11 @@ from bd_gen.eval.metrics import (
     _degree_histogram,
     _graph_dict_to_nx,
     _has_cycle,
+    _js_divergence,
     _per_type_degree_histograms,
     _spectral_features,
+    _total_variation,
+    _wasserstein1_1d_discrete,
     conditional_edge_kl,
     distribution_match,
     diversity,
@@ -172,6 +177,46 @@ class TestDistributionMatch:
         samples = [{"num_rooms": 2, "node_types": [0, 1], "edge_triples": []}]
         result = distribution_match(samples, [])
         assert result["node_kl"] == 0.0
+
+    def test_returns_js_tv_w1_keys(self):
+        g = {
+            "num_rooms": 3,
+            "node_types": [0, 1, 2],
+            "edge_triples": [(0, 1, 2), (1, 2, 3)],
+        }
+        result = distribution_match([g] * 10, [g] * 10)
+        for key in ("node_js", "edge_js", "node_tv", "edge_tv", "rooms_w1"):
+            assert key in result
+
+    def test_identical_js_tv_w1_near_zero(self):
+        g = {
+            "num_rooms": 3,
+            "node_types": [0, 1, 2],
+            "edge_triples": [(0, 1, 2), (1, 2, 3)],
+        }
+        result = distribution_match([g] * 10, [g] * 10)
+        assert result["node_js"] < 1e-6
+        assert result["edge_js"] < 1e-6
+        assert result["node_tv"] < 1e-6
+        assert result["edge_tv"] < 1e-6
+        assert result["rooms_w1"] < 1e-6
+
+    def test_different_distributions_js_tv_positive(self):
+        samples = [
+            {"num_rooms": 2, "node_types": [0, 0], "edge_triples": [(0, 1, 0)]}
+        ] * 10
+        t = {
+            "num_rooms": 4,
+            "node_types": [5, 6, 7, 8],
+            "edge_triples": [(0, 1, 5), (2, 3, 9)],
+        }
+        training = [t] * 10
+        result = distribution_match(samples, training)
+        assert result["node_js"] > 0.01
+        assert result["edge_js"] > 0.01
+        assert result["node_tv"] > 0.01
+        assert result["edge_tv"] > 0.01
+        assert result["rooms_w1"] > 0.01
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +494,102 @@ class TestGraphStructureMMD:
 
 
 # ---------------------------------------------------------------------------
+# Distance primitives: _total_variation, _js_divergence, _wasserstein1_1d_discrete
+# ---------------------------------------------------------------------------
+
+
+class TestTotalVariation:
+    def test_identical(self):
+        p = [0.25, 0.25, 0.25, 0.25]
+        assert _total_variation(p, p) == pytest.approx(0.0)
+
+    def test_disjoint(self):
+        assert _total_variation([1.0, 0.0], [0.0, 1.0]) == pytest.approx(1.0)
+
+    def test_symmetric(self):
+        p = [0.3, 0.7]
+        q = [0.5, 0.5]
+        assert _total_variation(p, q) == pytest.approx(_total_variation(q, p))
+
+    def test_bounded_0_1(self):
+        p = [0.1, 0.9]
+        q = [0.6, 0.4]
+        tv = _total_variation(p, q)
+        assert 0.0 <= tv <= 1.0
+
+    def test_different_lengths(self):
+        p = [0.5, 0.5]
+        q = [0.5, 0.3, 0.2]
+        tv = _total_variation(p, q)
+        assert tv > 0.0
+
+
+class TestJSDivergence:
+    def test_identical(self):
+        p = [0.25, 0.25, 0.25, 0.25]
+        assert _js_divergence(p, p) == pytest.approx(0.0)
+
+    def test_disjoint(self):
+        js = _js_divergence([1.0, 0.0], [0.0, 1.0])
+        assert js == pytest.approx(math.log(2), abs=1e-10)
+
+    def test_symmetric(self):
+        p = [0.3, 0.7]
+        q = [0.5, 0.5]
+        assert _js_divergence(p, q) == pytest.approx(_js_divergence(q, p))
+
+    def test_bounded(self):
+        p = [0.1, 0.9]
+        q = [0.6, 0.4]
+        js = _js_divergence(p, q)
+        assert 0.0 <= js <= math.log(2)
+
+    def test_different_lengths(self):
+        p = [0.5, 0.5]
+        q = [0.5, 0.3, 0.2]
+        js = _js_divergence(p, q)
+        assert js > 0.0
+
+    def test_zero_entries(self):
+        """p_k=0 should not cause errors (0*log(0/x)=0 convention)."""
+        p = [1.0, 0.0, 0.0]
+        q = [0.0, 0.5, 0.5]
+        js = _js_divergence(p, q)
+        assert js == pytest.approx(math.log(2), abs=1e-10)
+
+
+class TestWasserstein1:
+    def test_identical(self):
+        p = [0.25, 0.25, 0.25, 0.25]
+        assert _wasserstein1_1d_discrete(p, p) == pytest.approx(0.0)
+
+    def test_shift_by_one(self):
+        """Shifting mass one bin costs 1.0."""
+        p = [1.0, 0.0, 0.0]
+        q = [0.0, 1.0, 0.0]
+        assert _wasserstein1_1d_discrete(p, q) == pytest.approx(1.0)
+
+    def test_shift_by_two(self):
+        """Shifting mass two bins costs 2.0."""
+        p = [1.0, 0.0, 0.0]
+        q = [0.0, 0.0, 1.0]
+        assert _wasserstein1_1d_discrete(p, q) == pytest.approx(2.0)
+
+    def test_symmetric(self):
+        p = [0.3, 0.7]
+        q = [0.5, 0.5]
+        assert _wasserstein1_1d_discrete(p, q) == pytest.approx(
+            _wasserstein1_1d_discrete(q, p)
+        )
+
+    def test_different_lengths(self):
+        p = [0.5, 0.5]
+        q = [0.5, 0.3, 0.2]
+        w1 = _wasserstein1_1d_discrete(p, q)
+        assert w1 > 0.0
+
+
+# ---------------------------------------------------------------------------
 # _canonicalize_edge
 # ---------------------------------------------------------------------------
 
@@ -507,14 +648,19 @@ class TestConditionalEdgeKL:
         assert result["conditional_edge_kl_mean"] < 1e-6
         assert result["conditional_edge_kl_weighted"] < 1e-6
 
-    def test_returns_three_keys(self):
+    def test_returns_expected_keys(self):
         g = _g([0, 1], [(0, 1, 3)])
         result = conditional_edge_kl([g] * 10, [g] * 10, min_pair_count=1)
-        assert set(result.keys()) == {
+        expected = {
             "conditional_edge_kl_mean",
             "conditional_edge_kl_weighted",
+            "conditional_edge_js_mean",
+            "conditional_edge_js_weighted",
+            "conditional_edge_tv_mean",
+            "conditional_edge_tv_weighted",
             "num_pairs_evaluated",
         }
+        assert expected.issubset(set(result.keys()))
 
     def test_empty_samples_returns_zeros(self):
         g = _g([0, 3], [(0, 1, 2)])
@@ -571,6 +717,79 @@ class TestConditionalEdgeKL:
         g = _g([3, 3], [(0, 1, 3)])  # Bath-Bath, above
         result = conditional_edge_kl([g] * 10, [g] * 10, min_pair_count=1)
         assert result["conditional_edge_kl_mean"] < 1e-6
+
+    def test_identical_js_tv_near_zero(self):
+        g = _g([0, 3], [(0, 1, 2)])
+        result = conditional_edge_kl([g] * 20, [g] * 20, min_pair_count=1)
+        assert result["conditional_edge_js_mean"] < 1e-6
+        assert result["conditional_edge_tv_mean"] < 1e-6
+
+    def test_different_distributions_js_tv_positive(self):
+        train = [_g([0, 3], [(0, 1, 2)])] * 20
+        samples = [_g([0, 3], [(0, 1, 3)])] * 20
+        result = conditional_edge_kl(samples, train, min_pair_count=1)
+        assert result["conditional_edge_js_mean"] > 0.01
+        assert result["conditional_edge_tv_mean"] > 0.01
+
+
+# ---------------------------------------------------------------------------
+# conditional_edge_distances_topN
+# ---------------------------------------------------------------------------
+
+
+class TestConditionalEdgeDistancesTopN:
+    def test_identical_near_zero(self):
+        from bd_gen.eval.metrics import conditional_edge_distances_topN
+
+        g = _g([0, 3], [(0, 1, 2)])
+        result = conditional_edge_distances_topN(
+            [g] * 20, [g] * 20, top_n=5, min_pair_count=1,
+        )
+        assert result["conditional_edge_kl_topN_mean"] < 1e-6
+        assert result["conditional_edge_js_topN_mean"] < 1e-6
+        assert result["conditional_edge_tv_topN_mean"] < 1e-6
+
+    def test_selects_top_n_pairs(self):
+        from bd_gen.eval.metrics import conditional_edge_distances_topN
+
+        # 3 distinct pairs with different frequencies
+        g1 = _g([0, 3], [(0, 1, 2)])  # pair (0,3)
+        g2 = _g([0, 1], [(0, 1, 3)])  # pair (0,1)
+        g3 = _g([1, 3], [(0, 1, 4)])  # pair (1,3)
+        # (0,3) appears 10x, (0,1) 5x, (1,3) 2x
+        train = [g1] * 10 + [g2] * 5 + [g3] * 2
+        result = conditional_edge_distances_topN(
+            train, train, top_n=2, min_pair_count=1,
+        )
+        # Should select 2 most frequent pairs
+        assert result["num_pairs_evaluated"] == 2.0
+        assert result["topN"] == 2.0
+
+    def test_empty_samples(self):
+        from bd_gen.eval.metrics import conditional_edge_distances_topN
+
+        g = _g([0, 3], [(0, 1, 2)])
+        result = conditional_edge_distances_topN([], [g] * 10)
+        assert result["num_pairs_evaluated"] == 0.0
+
+    def test_returns_expected_keys(self):
+        from bd_gen.eval.metrics import conditional_edge_distances_topN
+
+        g = _g([0, 3], [(0, 1, 2)])
+        result = conditional_edge_distances_topN(
+            [g] * 10, [g] * 10, top_n=5, min_pair_count=1,
+        )
+        expected = {
+            "conditional_edge_kl_topN_mean",
+            "conditional_edge_kl_topN_weighted",
+            "conditional_edge_js_topN_mean",
+            "conditional_edge_js_topN_weighted",
+            "conditional_edge_tv_topN_mean",
+            "conditional_edge_tv_topN_weighted",
+            "topN",
+            "num_pairs_evaluated",
+        }
+        assert expected.issubset(set(result.keys()))
 
 
 # ---------------------------------------------------------------------------
@@ -762,14 +981,33 @@ class TestTypeConditionedDegreeKL:
         result = type_conditioned_degree_kl([g] * 10, [], n_max=4)
         assert result["degree_kl_per_type_mean"] == 0.0
 
-    def test_returns_three_keys(self):
+    def test_returns_expected_keys(self):
         g = _g([0, 1], [(0, 1, 2)])
         result = type_conditioned_degree_kl([g] * 10, [g] * 10, n_max=4, min_type_count=1)
-        assert set(result.keys()) == {
+        expected = {
             "degree_kl_per_type_mean",
             "degree_kl_per_type_weighted",
+            "degree_js_per_type_mean",
+            "degree_js_per_type_weighted",
+            "degree_tv_per_type_mean",
+            "degree_tv_per_type_weighted",
             "num_types_evaluated",
         }
+        assert expected.issubset(set(result.keys()))
+
+    def test_identical_js_tv_near_zero(self):
+        g = _g([0, 1, 2], [(0, 1, 2), (1, 2, 3)])
+        graphs = [g] * 30
+        result = type_conditioned_degree_kl(graphs, graphs, n_max=4, min_type_count=1)
+        assert result["degree_js_per_type_mean"] < 1e-6
+        assert result["degree_tv_per_type_mean"] < 1e-6
+
+    def test_different_distributions_js_tv_positive(self):
+        train = [_g([0, 1], [(0, 1, 2)])] * 30
+        samples = [_g([0, 1, 2, 3], [(0, 1, 2), (0, 2, 3), (0, 3, 7)])] * 30
+        result = type_conditioned_degree_kl(samples, train, n_max=8, min_type_count=1)
+        assert result["degree_js_per_type_mean"] > 0.001
+        assert result["degree_tv_per_type_mean"] > 0.001
 
 
 # ---------------------------------------------------------------------------
@@ -859,3 +1097,128 @@ class TestModeCoverage:
             "num_training_modes",
             "num_sample_modes",
         }
+
+
+# ---------------------------------------------------------------------------
+# Stratified metrics: validity_by_num_rooms, spatial_transitivity_by_num_rooms,
+# edge_present_rate_by_num_rooms
+# ---------------------------------------------------------------------------
+
+
+class TestValidityByNumRooms:
+    def test_groups_by_num_rooms(self):
+        from bd_gen.eval.metrics import validity_by_num_rooms
+
+        g3 = _g([0, 1, 2], [(0, 1, 2), (1, 2, 3)])
+        g4 = _g([0, 1, 2, 3], [(0, 1, 2), (1, 2, 3), (2, 3, 0)])
+        validity_results = [
+            {"overall": True, "connected": True, "valid_types": True, "no_mask_tokens": True},
+            {"overall": True, "connected": True, "valid_types": True, "no_mask_tokens": True},
+            {"overall": False, "connected": False, "valid_types": True, "no_mask_tokens": True},
+        ]
+        graph_dicts = [g3, g3, g4]
+        result = validity_by_num_rooms(validity_results, graph_dicts)
+        assert "3" in result
+        assert "4" in result
+        assert result["3"]["overall"] == 1.0
+        assert result["4"]["overall"] == 0.0
+
+    def test_empty_input(self):
+        from bd_gen.eval.metrics import validity_by_num_rooms
+
+        assert validity_by_num_rooms([], []) == {}
+
+
+class TestSpatialTransitivityByNumRooms:
+    def test_groups_by_num_rooms(self):
+        from bd_gen.eval.metrics import spatial_transitivity_by_num_rooms
+
+        good3 = _g([0, 1, 2], [(0, 1, 2), (1, 2, 2)])
+        bad4 = _g([0, 1, 2, 3], [(0, 1, 2), (1, 2, 2), (0, 2, 7)])
+        result = spatial_transitivity_by_num_rooms([good3, good3, bad4])
+        assert "3" in result
+        assert result["3"]["transitivity_score"] == 1.0
+        assert "4" in result
+        assert result["4"]["transitivity_score"] == 0.0
+
+    def test_empty_input(self):
+        from bd_gen.eval.metrics import spatial_transitivity_by_num_rooms
+
+        assert spatial_transitivity_by_num_rooms([]) == {}
+
+
+class TestEdgePresentRateByNumRooms:
+    def test_known_rates(self):
+        from bd_gen.eval.metrics import edge_present_rate_by_num_rooms
+
+        # 3 rooms: E_possible = 3, 2 edges present -> rate = 2/3
+        g3 = _g([0, 1, 2], [(0, 1, 2), (1, 2, 3)])
+        # 4 rooms: E_possible = 6, 3 edges present -> rate = 0.5
+        g4 = _g([0, 1, 2, 3], [(0, 1, 2), (1, 2, 3), (2, 3, 0)])
+        result = edge_present_rate_by_num_rooms([g3, g4])
+        assert result["3"] == pytest.approx(2 / 3)
+        assert result["4"] == pytest.approx(0.5)
+
+    def test_averages_within_group(self):
+        from bd_gen.eval.metrics import edge_present_rate_by_num_rooms
+
+        # Two 3-room graphs with different edge counts
+        g3a = _g([0, 1, 2], [(0, 1, 2)])  # 1/3
+        g3b = _g([0, 1, 2], [(0, 1, 2), (0, 2, 3), (1, 2, 0)])  # 3/3
+        result = edge_present_rate_by_num_rooms([g3a, g3b])
+        assert result["3"] == pytest.approx((1 / 3 + 1.0) / 2)
+
+    def test_empty_input(self):
+        from bd_gen.eval.metrics import edge_present_rate_by_num_rooms
+
+        assert edge_present_rate_by_num_rooms([]) == {}
+
+
+# ---------------------------------------------------------------------------
+# _aggregate_multi_seed (from evaluate.py)
+# ---------------------------------------------------------------------------
+
+
+class TestAggregateMultiSeed:
+    def test_mean_std_basic(self):
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from evaluate import _aggregate_multi_seed
+
+        per_seed = {
+            42: {"eval/validity_rate": 0.9, "eval/diversity": 0.8},
+            123: {"eval/validity_rate": 0.95, "eval/diversity": 0.85},
+        }
+        summary = _aggregate_multi_seed(per_seed)
+        assert "eval/validity_rate" in summary
+        assert summary["eval/validity_rate"]["mean"] == pytest.approx(0.925)
+        assert summary["eval/validity_rate"]["std"] > 0.0
+
+    def test_nested_dicts_flattened(self):
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from evaluate import _aggregate_multi_seed
+
+        per_seed = {
+            42: {"eval/x": 1.0, "stratified": {"3": {"val": 0.5}}},
+            123: {"eval/x": 2.0, "stratified": {"3": {"val": 0.7}}},
+        }
+        summary = _aggregate_multi_seed(per_seed)
+        assert "stratified/3/val" in summary
+        assert summary["stratified/3/val"]["mean"] == pytest.approx(0.6)
+
+    def test_single_seed_zero_std(self):
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from evaluate import _aggregate_multi_seed
+
+        per_seed = {42: {"eval/a": 0.5}}
+        summary = _aggregate_multi_seed(per_seed)
+        assert summary["eval/a"]["mean"] == pytest.approx(0.5)
+        assert summary["eval/a"]["std"] == pytest.approx(0.0)
