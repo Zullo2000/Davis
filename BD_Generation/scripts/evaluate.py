@@ -123,7 +123,9 @@ def _generate_and_evaluate_single_seed(
                 batch_size=bs,
                 num_steps=cfg.eval.sampling_steps,
                 temperature=cfg.eval.temperature,
+                top_p=cfg.eval.get("top_p", None),
                 unmasking_mode=unmasking_mode,
+                t_switch=cfg.eval.remasking.get("t_switch", 1.0),
                 remasking_fn=remasking_fn,
                 num_rooms_distribution=num_rooms_dist,
                 device=device,
@@ -360,8 +362,10 @@ def evaluate(cfg: DictConfig) -> None:
     )
     if remasking_fn is not None:
         logger.info(
-            "Remasking enabled: strategy=%s, eta=%.3f",
-            cfg.eval.remasking.strategy, cfg.eval.remasking.eta,
+            "Remasking enabled: strategy=%s, eta=%.3f, t_switch=%.2f",
+            cfg.eval.remasking.strategy,
+            cfg.eval.remasking.eta,
+            cfg.eval.remasking.get("t_switch", 1.0),
         )
 
     # --- Load dataset for reference statistics ---
@@ -501,12 +505,29 @@ def evaluate(cfg: DictConfig) -> None:
 
     remasking_cfg = cfg.eval.remasking
     unmasking_mode = cfg.eval.get("unmasking_mode", "random")
-    if remasking_cfg.enabled:
-        method_name = f"remdm_{remasking_cfg.strategy}_eta{remasking_cfg.eta}"
+    top_p = cfg.eval.get("top_p", None)
+
+    # Build systematic method name: {unmasking}_{sampling}_{remasking}
+    unmask_tag = unmasking_mode
+    if top_p is not None and top_p < 1.0:
+        sampling_tag = f"topp{top_p}"
+    elif cfg.eval.temperature == 0.0:
+        sampling_tag = "argmax"
     else:
-        method_name = "mdlm_baseline"
-    if unmasking_mode != "random":
-        method_name += f"_{unmasking_mode}"
+        sampling_tag = f"temp{cfg.eval.temperature}"
+
+    if remasking_cfg.enabled:
+        if remasking_cfg.strategy == "confidence":
+            t_sw = remasking_cfg.get("t_switch", 1.0)
+            remask_tag = f"remdm_confidence_tsw{t_sw}"
+        else:
+            remask_tag = (
+                f"remdm_{remasking_cfg.strategy}_eta{remasking_cfg.eta}"
+            )
+    else:
+        remask_tag = "no_remask"
+    method_name = f"{unmask_tag}_{sampling_tag}_{remask_tag}"
+
     eval_result_path = _PROJECT_ROOT / "eval_results" / f"{method_name}.json"
     save_eval_result(
         path=eval_result_path,
@@ -516,7 +537,8 @@ def evaluate(cfg: DictConfig) -> None:
             "num_samples": cfg.eval.num_samples,
             "sampling_steps": cfg.eval.sampling_steps,
             "temperature": cfg.eval.temperature,
-            "unmasking_mode": cfg.eval.get("unmasking_mode", "random"),
+            "top_p": top_p,
+            "unmasking_mode": unmasking_mode,
             "remasking_enabled": remasking_cfg.enabled,
             "remasking_strategy": (
                 remasking_cfg.strategy if remasking_cfg.enabled
@@ -524,6 +546,10 @@ def evaluate(cfg: DictConfig) -> None:
             ),
             "remasking_eta": (
                 remasking_cfg.eta if remasking_cfg.enabled
+                else None
+            ),
+            "remasking_t_switch": (
+                remasking_cfg.get("t_switch", 1.0) if remasking_cfg.enabled
                 else None
             ),
             "checkpoint": str(ckpt_path.name),
@@ -554,7 +580,9 @@ def evaluate(cfg: DictConfig) -> None:
                     batch_size=bs,
                     num_steps=cfg.eval.sampling_steps,
                     temperature=cfg.eval.temperature,
+                    top_p=cfg.eval.get("top_p", None),
                     unmasking_mode=cfg.eval.get("unmasking_mode", "random"),
+                    t_switch=cfg.eval.remasking.get("t_switch", 1.0),
                     remasking_fn=remasking_fn,
                     num_rooms_distribution=num_rooms_dist,
                     device=device,

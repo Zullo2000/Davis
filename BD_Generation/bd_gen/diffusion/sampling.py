@@ -49,6 +49,41 @@ def _gumbel_sample(logits: Tensor, temperature: float, device: torch.device) -> 
     return perturbed.float()
 
 
+def _top_p_sample(logits: Tensor, top_p: float) -> Tensor:
+    """Sample from the top-p (nucleus) of the probability distribution.
+
+    Keeps the smallest set of tokens whose cumulative probability >= top_p,
+    zeros out the rest, and samples from the filtered distribution.
+    Uses temperature=1.0 (raw softmax). See Holtzman et al. (2020).
+
+    Args:
+        logits: (..., vocab_size) float32 logits.
+        top_p: Cumulative probability threshold in (0, 1].
+
+    Returns:
+        (...,) long tensor of sampled token indices.
+    """
+    orig_shape = logits.shape[:-1]
+    vocab_size = logits.shape[-1]
+    flat_logits = logits.reshape(-1, vocab_size)  # (N, V)
+
+    probs = torch.softmax(flat_logits, dim=-1)
+    sorted_probs, sorted_indices = probs.sort(dim=-1, descending=True)
+    cumulative_probs = sorted_probs.cumsum(dim=-1)
+
+    # Mask tokens beyond the nucleus (keep at least top-1 token)
+    sorted_mask = (cumulative_probs - sorted_probs) >= top_p
+    sorted_probs[sorted_mask] = 0.0
+    sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
+
+    # Sample from filtered distribution
+    sampled_sorted_idx = torch.multinomial(sorted_probs, num_samples=1)  # (N, 1)
+
+    # Map back to original vocabulary indices
+    sampled_idx = sorted_indices.gather(-1, sampled_sorted_idx).squeeze(-1)  # (N,)
+    return sampled_idx.reshape(orig_shape)
+
+
 def _clamp_pad(
     x_t: Tensor,
     pad_mask: Tensor,
@@ -86,7 +121,9 @@ def sample(
     batch_size: int,
     num_steps: int,
     temperature: float = 0.0,
+    top_p: float | None = None,
     unmasking_mode: str = "random",
+    t_switch: float = 1.0,
     guidance_fn: Callable | None = None,
     fixed_tokens: Tensor | None = None,
     fixed_mask: Tensor | None = None,
@@ -106,10 +143,19 @@ def sample(
         num_steps: Number of discrete denoising steps (N).
         temperature: Sampling temperature. 0.0 = deterministic argmax.
             > 0.0 = stochastic via Gumbel-perturbed logits.
+            Ignored when top_p is set.
+        top_p: If not None and < 1.0, use nucleus (top-p) sampling.
+            Keeps smallest set of tokens whose cumulative probability
+            >= top_p, then samples from the filtered distribution at
+            temperature=1.0. Takes priority over temperature.
         unmasking_mode: Strategy for selecting which MASK positions to
             unmask at each step. "random" = probabilistic coin-flip per
             position (original MDLM). "llada" = unmask highest-
             confidence positions first (LLaDA-style, Nie et al.).
+        t_switch: Timestep threshold for activating remasking. Remasking
+            is only applied when t_now < t_switch. Default 1.0 means
+            remasking at all steps (backward compatible). Lower values
+            delay remasking until later in denoising (ReMDM-Switch).
         guidance_fn: Optional callable that receives
             ``((node_logits, edge_logits), x_t, t_scalar, pad_mask)``
             and returns a modified ``(node_logits, edge_logits)`` tuple.
@@ -201,7 +247,10 @@ def sample(
 
         # 4d. Choose predicted tokens (needed before unmasking decision
         #     for confidence mode)
-        if temperature == 0.0:
+        if top_p is not None and top_p < 1.0:
+            node_pred = _top_p_sample(node_logits, top_p)  # (B, n_max)
+            edge_pred = _top_p_sample(edge_logits, top_p)  # (B, n_edges)
+        elif temperature == 0.0:
             node_pred = node_logits.argmax(dim=-1)  # (B, n_max)
             edge_pred = edge_logits.argmax(dim=-1)  # (B, n_edges)
         else:
@@ -275,7 +324,8 @@ def sample(
 
         # 4j. Apply remasking if provided (ReMDM)
         # Skip at last step (i=0): must finalize all tokens.
-        if remasking_fn is not None and i > 0:
+        # Skip if t_now >= t_switch (ReMDM-Switch: remask only late in denoising).
+        if remasking_fn is not None and i > 0 and t_now < t_switch:
             x_t = remasking_fn(
                 x_t, t_now, t_next, pad_mask,
                 node_logits=node_logits, edge_logits=edge_logits,

@@ -38,8 +38,10 @@ class RemaskingSchedule:
         - "confidence": Per-position remasking probability based on model
           confidence (ReMDM paper Section 4.1). Low-confidence decoded
           tokens get higher remasking probability, high-confidence tokens
-          get lower probability. The total remasking budget matches the
-          "cap" strategy, but is redistributed by confidence.
+          get lower probability. The total remasking budget is sigma_max
+          (determined by the noise schedule), distributed across positions
+          by softmax(-confidence). The eta parameter is NOT used for this
+          strategy — sigma_max acts as the natural budget controller.
 
     Args:
         strategy: Remasking strategy ("cap", "rescale", or "confidence").
@@ -156,7 +158,7 @@ class RemaskingSchedule:
         Returns:
             (B, SEQ_LEN) long tensor with some positions re-masked.
         """
-        if self.eta == 0.0:
+        if self.strategy != "confidence" and self.eta == 0.0:
             return x_t
 
         batch_size, seq_len = x_t.shape
@@ -218,8 +220,10 @@ class RemaskingSchedule:
         positions based on model confidence. Low-confidence positions are
         more likely to be remasked, high-confidence positions less so.
 
-        The total remasking budget (expected number of remasked tokens)
-        matches the "cap" strategy: min(eta, sigma_max) * n_decoded.
+        The total remasking budget is sigma_max * n_decoded (determined
+        entirely by the noise schedule). The eta parameter is NOT used.
+        Formula: sigma_t[l] = softmax(-confidence)[l] * sigma_max
+        (ReMDM paper Section 4.1).
 
         Args:
             x_t: (B, SEQ_LEN) current tokens.
@@ -242,12 +246,9 @@ class RemaskingSchedule:
         n_max = self.vocab_config.n_max
         device = x_t.device
 
-        # --- Step 1: Base sigma (same budget as cap strategy) ---
+        # --- Step 1: Base sigma (sigma_max from noise schedule, no eta) ---
         sigma_max = self._compute_sigma_max(t_now, t_next, batch_size, device)
-        sigma_cap = torch.minimum(
-            torch.tensor(self.eta, dtype=torch.float32, device=device),
-            sigma_max,
-        )  # (B, 1)
+        # (B, 1) — this is the total remasking budget
 
         # --- Step 2: Per-position confidence ---
         # Confidence = P(decoded_token) from the model's softmax output.
@@ -278,12 +279,12 @@ class RemaskingSchedule:
         # softmax over positions within each sample
         eta_conf = F.softmax(neg_conf, dim=-1)  # (B, SEQ_LEN), sums to ~1
 
-        # --- Step 4: Scale to match cap strategy budget ---
+        # --- Step 4: Scale to sigma_max budget ---
         # eta_conf sums to 1, so average over decoded positions = 1/n_decoded.
-        # Multiply by n_decoded so the average per-position sigma = sigma_cap.
+        # Multiply by n_decoded so the average per-position sigma = sigma_max.
         n_decoded = remask_candidates.sum(dim=1, keepdim=True).float()
         n_decoded = n_decoded.clamp(min=1.0)
-        sigma_per_pos = (sigma_cap * eta_conf * n_decoded).clamp(0.0, 1.0)
+        sigma_per_pos = (sigma_max * eta_conf * n_decoded).clamp(0.0, 1.0)
 
         # --- Step 5: Stochastic remasking ---
         remask_rand = torch.rand(batch_size, seq_len, device=device)

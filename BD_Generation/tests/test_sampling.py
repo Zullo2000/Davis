@@ -330,7 +330,11 @@ class TestGuidanceAndInpainting:
     def test_remasking_fn_called(
         self, dummy_model, linear_schedule, vocab_config
     ):
-        """A remasking_fn that tracks calls is invoked at each step except the last."""
+        """A remasking_fn that tracks calls is invoked at intermediate steps.
+
+        Skipped at: i=0 (last step, must finalize) and i=num_steps-1
+        (first step, t_now=1.0 which is not < t_switch=1.0).
+        """
         call_count = [0]
 
         def tracking_remasking(x_t, t_now, t_next, pad_mask, **kwargs):
@@ -343,8 +347,8 @@ class TestGuidanceAndInpainting:
             batch_size=2, num_steps=num_steps, fixed_num_rooms=4,
             remasking_fn=tracking_remasking,
         )
-        # Remasking is skipped at the last step (i=0) to finalize tokens
-        assert call_count[0] == num_steps - 1
+        # Skipped at i=0 (finalize) and i=num_steps-1 (t_now=1.0)
+        assert call_count[0] == num_steps - 2
 
 
 # =========================================================================
@@ -591,3 +595,194 @@ class TestFloat64Precision:
             f"Token diversity collapsed: only {len(unique_types)} unique "
             f"node types across 10 samples with 500 steps"
         )
+
+
+# =========================================================================
+# Top-p (Nucleus) Sampling
+# =========================================================================
+
+
+class TestTopPSampling:
+    """Tests for top_p nucleus sampling parameter."""
+
+    def test_top_p_no_mask_in_output(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """Top-p sampling produces no MASK tokens in final output."""
+        result = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=4, num_steps=10, top_p=0.9,
+            fixed_num_rooms=8,
+        )
+        assert (result[:, :vocab_config.n_max] != NODE_MASK_IDX).all()
+        assert (result[:, vocab_config.n_max:] != EDGE_MASK_IDX).all()
+
+    def test_top_p_pad_preserved(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """PAD positions remain PAD with top-p sampling."""
+        result = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=4, num_steps=10, top_p=0.9,
+            fixed_num_rooms=3,
+        )
+        n_max = vocab_config.n_max
+        assert (result[:, 3:n_max] == NODE_PAD_IDX).all()
+
+    def test_top_p_is_stochastic(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """Two calls with different seeds produce different outputs."""
+        torch.manual_seed(42)
+        r1 = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=4, num_steps=10, top_p=0.9,
+            fixed_num_rooms=8,
+        )
+        torch.manual_seed(123)
+        r2 = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=4, num_steps=10, top_p=0.9,
+            fixed_num_rooms=8,
+        )
+        assert not torch.equal(r1, r2), "Top-p should be stochastic"
+
+    def test_top_p_overrides_temperature(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """When top_p is set, temperature is ignored (stochastic output)."""
+        # With top_p=0.9 and temperature=0.0, top-p should take priority
+        torch.manual_seed(42)
+        r1 = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=4, num_steps=10, temperature=0.0, top_p=0.9,
+            fixed_num_rooms=8,
+        )
+        torch.manual_seed(123)
+        r2 = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=4, num_steps=10, temperature=0.0, top_p=0.9,
+            fixed_num_rooms=8,
+        )
+        # Different seeds → different results (not argmax)
+        assert not torch.equal(r1, r2), (
+            "top_p should override temperature=0.0 (not deterministic)"
+        )
+
+    def test_top_p_none_defaults_to_temperature(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """top_p=None falls through to temperature (argmax when temp=0)."""
+        torch.manual_seed(42)
+        r1 = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=2, num_steps=5, temperature=0.0, top_p=None,
+            fixed_num_rooms=4,
+        )
+        torch.manual_seed(42)
+        r2 = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=2, num_steps=5, temperature=0.0,
+            fixed_num_rooms=4,
+        )
+        assert torch.equal(r1, r2), "top_p=None should match default behavior"
+
+    def test_top_p_with_llada_unmasking(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """Top-p works with LLaDA unmasking mode."""
+        result = sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=4, num_steps=10, top_p=0.9,
+            unmasking_mode="llada", fixed_num_rooms=8,
+        )
+        assert (result[:, :vocab_config.n_max] != NODE_MASK_IDX).all()
+        assert (result[:, vocab_config.n_max:] != EDGE_MASK_IDX).all()
+
+
+# =========================================================================
+# t_switch (ReMDM-Switch)
+# =========================================================================
+
+
+class TestTSwitch:
+    """Tests for t_switch parameter controlling when remasking activates."""
+
+    def test_t_switch_default_backward_compatible(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """t_switch=1.0 (default) gives same behavior as no t_switch."""
+        from bd_gen.diffusion.remasking import RemaskingSchedule
+
+        call_count = [0]
+        original_fn = RemaskingSchedule(
+            "cap", 0.3, linear_schedule, vocab_config,
+        )
+
+        def tracking_fn(x_t, t_now, t_next, pad_mask, **kwargs):
+            call_count[0] += 1
+            return original_fn(x_t, t_now, t_next, pad_mask, **kwargs)
+
+        torch.manual_seed(42)
+        sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=2, num_steps=10, temperature=0.5,
+            remasking_fn=tracking_fn, t_switch=1.0,
+            fixed_num_rooms=4,
+        )
+        # t_switch=1.0: remasking at all steps where i > 0 and t_now < 1.0.
+        # i ranges from 9 down to 0. At i=9, t_now=1.0 (not < 1.0, skipped).
+        # At i=0, i > 0 is False (skipped). So called for i=8..1 = 8 calls.
+        assert call_count[0] == 8
+
+    def test_t_switch_restricts_remasking(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """t_switch=0.5 only calls remasking when t_now < 0.5."""
+        from bd_gen.diffusion.remasking import RemaskingSchedule
+
+        call_count = [0]
+        original_fn = RemaskingSchedule(
+            "cap", 0.3, linear_schedule, vocab_config,
+        )
+
+        def tracking_fn(x_t, t_now, t_next, pad_mask, **kwargs):
+            call_count[0] += 1
+            return original_fn(x_t, t_now, t_next, pad_mask, **kwargs)
+
+        torch.manual_seed(42)
+        sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=2, num_steps=10, temperature=0.5,
+            remasking_fn=tracking_fn, t_switch=0.5,
+            fixed_num_rooms=4,
+        )
+        # num_steps=10, t_now values: 1.0, 0.9, ..., 0.1
+        # t_now < 0.5 at: 0.4 (i=3), 0.3 (i=2), 0.2 (i=1)
+        # i=0 skipped by i > 0 guard. So 3 calls.
+        assert call_count[0] == 3
+
+    def test_t_switch_zero_disables_remasking(
+        self, dummy_model, linear_schedule, vocab_config
+    ):
+        """t_switch=0.0 means remasking never activates."""
+        from bd_gen.diffusion.remasking import RemaskingSchedule
+
+        call_count = [0]
+        original_fn = RemaskingSchedule(
+            "cap", 0.3, linear_schedule, vocab_config,
+        )
+
+        def tracking_fn(x_t, t_now, t_next, pad_mask, **kwargs):
+            call_count[0] += 1
+            return original_fn(x_t, t_now, t_next, pad_mask, **kwargs)
+
+        torch.manual_seed(42)
+        sample(
+            dummy_model, linear_schedule, vocab_config,
+            batch_size=2, num_steps=10, temperature=0.5,
+            remasking_fn=tracking_fn, t_switch=0.0,
+            fixed_num_rooms=4,
+        )
+        # t_now < 0.0 is never true
+        assert call_count[0] == 0

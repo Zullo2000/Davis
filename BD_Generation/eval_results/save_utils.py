@@ -336,10 +336,12 @@ def _build_config_table(
         ("num_samples", "Num samples"),
         ("sampling_steps", "Sampling steps"),
         ("temperature", "Temperature"),
+        ("top_p", "Top-p"),
         ("unmasking_mode", "Unmasking mode"),
         ("remasking_enabled", "Remasking"),
         ("remasking_strategy", "Remasking strategy"),
         ("remasking_eta", "Remasking eta"),
+        ("remasking_t_switch", "Remasking t_switch"),
         ("checkpoint", "Checkpoint"),
     ]
 

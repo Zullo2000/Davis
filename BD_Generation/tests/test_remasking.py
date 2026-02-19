@@ -592,19 +592,79 @@ class TestConfidenceRemasking:
             "Expected low > high."
         )
 
-    def test_confidence_eta_zero_no_remasking(self, linear_schedule,
-                                               vocab_config,
-                                               mixed_tokens_and_masks):
-        """eta=0 should never remask, even with confidence strategy."""
-        x_t, pad_mask = mixed_tokens_and_masks
-        rs = RemaskingSchedule("confidence", 0.0, linear_schedule, vocab_config)
-        node_logits = torch.randn(2, vocab_config.n_max, NODE_VOCAB_SIZE)
-        edge_logits = torch.randn(2, vocab_config.n_edges, EDGE_VOCAB_SIZE)
-        result = rs(
-            x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
-            node_logits=node_logits, edge_logits=edge_logits,
+    def test_confidence_ignores_eta(self, linear_schedule, vocab_config):
+        """Confidence strategy ignores eta — uses sigma_max directly."""
+        vc = vocab_config
+        B = 50
+        x_t = torch.zeros(B, vc.seq_len, dtype=torch.long)
+        pad_mask = torch.ones(B, vc.seq_len, dtype=torch.bool)
+        for k in range(vc.n_max):
+            x_t[:, k] = k % 10
+        for pos in range(vc.n_edges):
+            x_t[:, vc.n_max + pos] = pos % 10
+
+        node_logits = torch.randn(B, vc.n_max, NODE_VOCAB_SIZE)
+        edge_logits = torch.randn(B, vc.n_edges, EDGE_VOCAB_SIZE)
+
+        rs_low_eta = RemaskingSchedule("confidence", 0.01, linear_schedule, vc)
+        rs_high_eta = RemaskingSchedule("confidence", 0.99, linear_schedule, vc)
+
+        low_count = 0
+        high_count = 0
+        for i in range(200):
+            torch.manual_seed(i)
+            r_low = rs_low_eta(
+                x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
+                node_logits=node_logits, edge_logits=edge_logits,
+            )
+            low_count += (r_low != x_t).sum().item()
+
+            torch.manual_seed(i)
+            r_high = rs_high_eta(
+                x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
+                node_logits=node_logits, edge_logits=edge_logits,
+            )
+            high_count += (r_high != x_t).sum().item()
+
+        # Both should have the same remasking rate (eta is ignored)
+        ratio = low_count / max(high_count, 1)
+        assert 0.9 < ratio < 1.1, (
+            f"Confidence eta=0.01 count={low_count}, eta=0.99 count={high_count}, "
+            f"ratio={ratio:.2f}. Confidence strategy should ignore eta."
         )
-        assert torch.equal(result, x_t)
+
+    def test_confidence_eta_zero_still_remasks(self, linear_schedule,
+                                                vocab_config):
+        """eta=0 should NOT prevent remasking for confidence strategy.
+
+        Confidence uses sigma_max directly (no eta dependency).
+        """
+        vc = vocab_config
+        B = 10
+        x_t = torch.zeros(B, vc.seq_len, dtype=torch.long)
+        pad_mask = torch.ones(B, vc.seq_len, dtype=torch.bool)
+        for k in range(vc.n_max):
+            x_t[:, k] = k % 10
+        for pos in range(vc.n_edges):
+            x_t[:, vc.n_max + pos] = pos % 10
+
+        node_logits = torch.randn(B, vc.n_max, NODE_VOCAB_SIZE)
+        edge_logits = torch.randn(B, vc.n_edges, EDGE_VOCAB_SIZE)
+
+        rs = RemaskingSchedule("confidence", 0.0, linear_schedule, vc)
+        total_remasked = 0
+        for i in range(100):
+            torch.manual_seed(i)
+            result = rs(
+                x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
+                node_logits=node_logits, edge_logits=edge_logits,
+            )
+            total_remasked += (result != x_t).sum().item()
+
+        assert total_remasked > 0, (
+            "Confidence strategy with eta=0 should still remask "
+            "(uses sigma_max, not eta)"
+        )
 
     def test_confidence_correct_mask_tokens(self, linear_schedule, vocab_config):
         """Confidence remasking uses correct MASK tokens per position type."""
@@ -651,12 +711,15 @@ class TestConfidenceRemasking:
         )
         assert torch.equal(x_t, x_t_copy)
 
-    def test_confidence_uniform_matches_cap_budget(self, linear_schedule,
-                                                     vocab_config):
-        """With uniform confidence, total remasking should match cap strategy."""
+    def test_confidence_uniform_matches_sigma_max_budget(self, linear_schedule,
+                                                          vocab_config):
+        """With uniform confidence, remasking rate should match sigma_max.
+
+        Confidence uses sigma_max as the total budget (no eta). With uniform
+        logits, each decoded position has equal probability = sigma_max.
+        """
         vc = vocab_config
-        B = 100
-        eta = 0.3
+        B = 50
         x_t = torch.zeros(B, vc.seq_len, dtype=torch.long)
         pad_mask = torch.ones(B, vc.seq_len, dtype=torch.bool)
         for k in range(vc.n_max):
@@ -664,34 +727,35 @@ class TestConfidenceRemasking:
         for pos in range(vc.n_edges):
             x_t[:, vc.n_max + pos] = pos % 10
 
-        # Uniform logits → uniform confidence → should behave like cap
+        # Uniform logits → uniform confidence
         node_logits = torch.zeros(B, vc.n_max, NODE_VOCAB_SIZE)
         edge_logits = torch.zeros(B, vc.n_edges, EDGE_VOCAB_SIZE)
 
-        conf_rs = RemaskingSchedule("confidence", eta, linear_schedule, vc)
-        cap_rs = RemaskingSchedule("cap", eta, linear_schedule, vc)
+        conf_rs = RemaskingSchedule("confidence", 0.0, linear_schedule, vc)
 
-        torch.manual_seed(0)
-        conf_count = 0
-        for i in range(200):
+        # Compute expected sigma_max for this timestep pair
+        sigma_max = conf_rs._compute_sigma_max(
+            0.5, 0.4, batch_size=1, device=torch.device("cpu"),
+        ).item()
+
+        n_trials = 500
+        total_remasked = 0
+        total_decoded = 0
+        for i in range(n_trials):
             torch.manual_seed(i)
-            r = conf_rs(
+            result = conf_rs(
                 x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
                 node_logits=node_logits, edge_logits=edge_logits,
             )
-            conf_count += (r != x_t).sum().item()
+            total_remasked += (result != x_t).sum().item()
+            total_decoded += vc.seq_len * B
 
-        cap_count = 0
-        for i in range(200):
-            torch.manual_seed(i)
-            r = cap_rs(x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask)
-            cap_count += (r != x_t).sum().item()
-
-        # Ratio should be close to 1.0 (within 30% tolerance)
-        ratio = conf_count / max(cap_count, 1)
-        assert 0.7 < ratio < 1.3, (
-            f"Confidence/cap ratio = {ratio:.2f}. "
-            f"With uniform logits, confidence should match cap budget."
+        observed_rate = total_remasked / total_decoded
+        # Should be close to sigma_max (within 20% relative tolerance)
+        assert abs(observed_rate - sigma_max) / max(sigma_max, 1e-6) < 0.2, (
+            f"Observed remasking rate {observed_rate:.4f} vs "
+            f"expected sigma_max {sigma_max:.4f}. "
+            "With uniform logits, confidence should match sigma_max budget."
         )
 
     def test_factory_accepts_confidence(self, linear_schedule, vocab_config):

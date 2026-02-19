@@ -331,7 +331,8 @@ Added `torch.isfinite(param.grad).all()` assertion to `test_full_train_step` in 
 ---
 
 ## Post-v1 — ReMDM Remasking (Inference-Time Scaling)
-Status: COMPLETE
+Status: MADE A MISTAKE - CONFUSED CONFIDENCE UNMASKING (LLADA) WITH CONFIDENCE REMASKING SCHEDULE
+Note: The remasking infrastructure code (remasking.py, sampling hook, tests) is structurally sound. The confidence strategy's budget formula was wrong (used eta-capped budget instead of sigma_max). Previous eval results produced with argmax-only sampling and the wrong confidence formulation are discarded. Being redone with corrected confidence strategy, top-p sampling, and t_switch.
 
 ### Summary
 Implemented ReMDM-cap remasking (arXiv:2503.00307) as an inference-only
@@ -406,7 +407,8 @@ coverage. The 2x archetype count suggests the baseline suffers from some
 mode collapse that remasking alleviates.
 
 ## Post-v1 — Evaluation Infrastructure Upgrade
-Status: COMPLETE
+Status: MADE A MISTAKE - CONFUSED CONFIDENCE UNMASKING (LLADA) WITH CONFIDENCE REMASKING SCHEDULE
+Note: The evaluation infrastructure code (JS/TV/W1 metrics, multi-seed, denoising eval, stratified drill-down, save_utils V2 JSON) is correct and retained. Only the evaluation results produced with the wrong confidence remasking and argmax-only sampling are discarded.
 
 ### Summary
 Comprehensive evaluation upgrade to make MDLM vs ReMDM comparisons
@@ -454,7 +456,8 @@ stratified drill-down metrics by num_rooms.
   sampler/distribution/*, sampler/structure/*, sampler/conditional/*
 
 ## Post-v1 — Systematic Comparison Infrastructure
-Status: COMPLETE
+Status: MADE A MISTAKE - CONFUSED CONFIDENCE UNMASKING (LLADA) WITH CONFIDENCE REMASKING SCHEDULE
+Note: The comparison infrastructure code (save_utils.py V2 JSON, compare.py, metric family grouping) is correct and retained. Only the comparison results produced with the wrong confidence remasking and argmax-only sampling are discarded.
 
 ### Summary
 Built a structured results pipeline for reproducible, multi-method comparison.
@@ -498,3 +501,30 @@ Auto-generated comparison tables with metric family grouping.
   - Cond. edge JS (weighted): 0.083 → 0.075 (-10%, better)
   - Type-cond. degree JS (weighted): 0.048 → 0.069 (+44%, worse)
   - Denoising metrics nearly identical (confirms sampler-only difference)
+
+---
+
+## Post-v1 — Retraining After Previously Committed Changes
+Status: PENDING
+
+### Summary
+Retrain the model to incorporate three code changes that are already committed
+but were never trained with. The v1 checkpoint (checkpoint_final.pt, 500 epochs)
+was trained before these changes were made.
+
+### Changes taking effect
+1. **SUBS Zero Masking Probabilities**: `BDDenoiser.forward()` now clamps MASK
+   and PAD logits to `-inf` before returning. During training, the softmax
+   denominator no longer wastes probability mass on impossible tokens, producing
+   cleaner gradients. (Commit: `47e17cb`)
+2. **Float64 ELBO Weights**: `ELBOLoss._compute_w()` now uses `alpha(t.double())`
+   for the ELBO weight computation. More precise loss weighting near `t → 0`
+   where catastrophic cancellation was possible in float32. (Commit: `47e17cb`)
+3. **Importance Sampling Enabled**: `training.importance_sampling` set to `true`.
+   CDF-based timestep sampling concentrates more training near high-variance
+   `t → 0` region, reducing gradient noise. (Commit: `0760aca`)
+
+### Training config
+- Same as v1: 500 epochs, lr=3e-4, AdamW, grad_clip=1.0, linear schedule
+- Expected time: ~17 min on RTX A5000
+- Output: new checkpoint (checkpoint_v2.pt)

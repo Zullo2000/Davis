@@ -1,6 +1,7 @@
 num_samples: 1000
 sampling_steps: 100
 temperature: 0.0
+top_p: null  # null = disabled; 0.9 = nucleus sampling (overrides temperature)
 unmasking_mode: "random"
 metrics: [validity, novelty, diversity, distribution_match, conditional_edge_kl, graph_structure_mmd, spatial_transitivity, type_conditioned_degree_kl, mode_coverage]
 checkpoint_path: null
@@ -12,6 +13,7 @@ remasking:
   enabled: false
   strategy: "cap"
   eta: 0.1
+  t_switch: 1.0  # ReMDM-Switch: only remask when t < t_switch (1.0 = always)
 # Multi-seed evaluation
 seeds: [42, 123, 456, 789, 1337]
 # Conditional top-N pairs (null to disable)
