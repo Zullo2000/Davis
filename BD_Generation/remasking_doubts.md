@@ -1,3 +1,0 @@
-try remasking with eta = 0.1, 0.2, ....
-num samples always 1000
-

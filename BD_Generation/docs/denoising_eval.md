@@ -2,6 +2,21 @@
 
 Sampler-independent evaluation of the denoiser's predictive quality on held-out data.
 
+## Why We Use It
+
+The denoising eval measures how well the neural network (the denoiser) can predict the original clean tokens from a partially masked input, without ever running the full sampling loop. It is a direct probe of the model's core skill.
+
+When we generate full samples, quality depends on two things: how good the denoiser's predictions are, and the sampling strategy (number of steps, random vs. confidence-based unmasking, remasking, etc.). If generated samples look bad, we cannot tell which component is at fault. Denoising eval removes the sampler from the equation by probing the model directly on corrupted validation data.
+
+This gives us:
+
+- **Apples-to-apples model comparison** -- different architectures, hyperparameters, or training runs are evaluated on the same fixed corruption levels, regardless of what sampler is later paired with them.
+- **Diagnostic profile across noise levels** -- a model might perform well at `t=0.1` (few masks, lots of context) but collapse at `t=0.9` (nearly everything masked). This per-timestep profile reveals *where* the model struggles, which is invisible in a single aggregate metric.
+- **Fast and cheap** -- only forward passes on validation data, no iterative sampling loop. Can be run every N training steps to track progress.
+- **Overfitting detection** -- `denoise/val_elbo` mirrors the training loss on held-out data, so divergence between train and val ELBO signals overfitting without running expensive generation.
+
+In short: generation-based metrics (graph structure similarity, MMD) tell us if the full system works end-to-end, while denoising eval tells us if the model itself has learned the data distribution -- and at which difficulty levels it succeeds or fails.
+
 ## Functions
 
 ### `denoising_eval(model, dataloader, noise_schedule, vocab_config, t_grid, device, max_batches=None)`
