@@ -27,6 +27,7 @@ from bd_gen.diffusion.forward_process import forward_mask
 from bd_gen.diffusion.noise_schedule import (
     CosineSchedule,
     LinearSchedule,
+    LogLinearSchedule,
     get_noise,
 )
 
@@ -87,6 +88,69 @@ class TestLinearSchedule:
         assert (diffs >= -1e-6).all()
 
 
+class TestLogLinearSchedule:
+    """Tests for LogLinearSchedule mathematical correctness."""
+
+    def test_alpha_at_t0(self, loglinear_schedule):
+        t = torch.tensor(0.0)
+        expected = 1.0  # 1 - (1-eps)*0 = 1
+        assert torch.isclose(loglinear_schedule.alpha(t), torch.tensor(expected), atol=1e-6)
+
+    def test_alpha_at_t1(self, loglinear_schedule):
+        t = torch.tensor(1.0)
+        expected = 1e-3  # 1 - (1-eps)*1 = eps
+        assert torch.isclose(loglinear_schedule.alpha(t), torch.tensor(expected), atol=1e-6)
+
+    def test_alpha_at_t_half(self, loglinear_schedule):
+        """Key property: alpha(0.5) ~ 0.5 (linear masking curve)."""
+        t = torch.tensor(0.5)
+        expected = 1.0 - (1.0 - 1e-3) * 0.5  # ~0.5005
+        assert torch.isclose(loglinear_schedule.alpha(t), torch.tensor(expected), atol=1e-4)
+
+    def test_alpha_prime_constant(self, loglinear_schedule):
+        """alpha_prime should be constant = -(1-eps) for all t."""
+        t = torch.linspace(0.0, 1.0, 50)
+        ap = loglinear_schedule.alpha_prime(t)
+        expected = -(1.0 - 1e-3)
+        assert torch.allclose(ap, torch.full_like(ap, expected), atol=1e-6)
+
+    def test_alpha_prime_sign(self, loglinear_schedule):
+        """alpha_prime(t) < 0 for all t (alpha is decreasing)."""
+        t = torch.linspace(0.01, 0.99, 100)
+        ap = loglinear_schedule.alpha_prime(t)
+        assert (ap < 0).all()
+
+    def test_alpha_monotonically_decreasing(self, loglinear_schedule):
+        t = torch.linspace(0.0, 1.0, 200)
+        alphas = loglinear_schedule.alpha(t)
+        diffs = alphas[1:] - alphas[:-1]
+        assert (diffs <= 0).all()
+
+    def test_sigma_nonnegative(self, loglinear_schedule):
+        t = torch.linspace(0.0, 1.0, 200)
+        sigmas = loglinear_schedule.sigma(t)
+        assert (sigmas >= -1e-6).all()
+
+    def test_sigma_consistent_with_alpha(self, loglinear_schedule):
+        """exp(-sigma(t)) should equal alpha(t)."""
+        t = torch.linspace(0.01, 0.99, 100)
+        from_sigma = torch.exp(-loglinear_schedule.sigma(t))
+        from_alpha = loglinear_schedule.alpha(t)
+        assert torch.allclose(from_sigma, from_alpha, atol=1e-5)
+
+    def test_importance_sampling_in_range(self, loglinear_schedule):
+        t = torch.linspace(0.0, 1.0, 100)
+        transformed = loglinear_schedule.importance_sampling_transformation(t)
+        assert (transformed >= -1e-6).all()
+        assert (transformed <= 1.0 + 1e-6).all()
+
+    def test_importance_sampling_monotonic(self, loglinear_schedule):
+        t = torch.linspace(0.0, 1.0, 100)
+        transformed = loglinear_schedule.importance_sampling_transformation(t)
+        diffs = transformed[1:] - transformed[:-1]
+        assert (diffs >= -1e-6).all()
+
+
 class TestCosineSchedule:
     """Tests for CosineSchedule mathematical correctness."""
 
@@ -141,6 +205,11 @@ class TestNoiseFactory:
         cfg = OmegaConf.create({"type": "linear", "sigma_min": 0.0, "sigma_max": 10.0})
         schedule = get_noise(cfg)
         assert isinstance(schedule, LinearSchedule)
+
+    def test_get_noise_loglinear(self):
+        cfg = OmegaConf.create({"type": "loglinear", "eps": 1e-3})
+        schedule = get_noise(cfg)
+        assert isinstance(schedule, LogLinearSchedule)
 
     def test_get_noise_cosine(self):
         cfg = OmegaConf.create({"type": "cosine", "eps": 1e-3})

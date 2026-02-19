@@ -18,7 +18,8 @@
 #
 # Usage:
 #   cd BD_Generation
-#   bash scripts/run_experiments.sh
+#   bash scripts/run_experiments.sh              # default: noise=linear
+#   bash scripts/run_experiments.sh loglinear     # use log-linear schedule
 #
 # Estimated time: ~70-90 min on RTX A5000
 # =============================================================================
@@ -26,12 +27,15 @@
 set -euo pipefail
 
 # --- Configuration ---
+NOISE_SCHEDULE="${1:-linear}"    # first arg, default "linear"
 EVAL_CMD="python scripts/evaluate.py"
 TRAIN_CMD="python scripts/train.py"
 COMMON="wandb.mode=disabled"
+NOISE_ARG="noise=$NOISE_SCHEDULE"
 
 echo "============================================"
 echo "  ReMDM Experiment Suite"
+echo "  Noise schedule: $NOISE_SCHEDULE"
 echo "  Started: $(date)"
 echo "============================================"
 
@@ -41,9 +45,10 @@ echo "============================================"
 echo ""
 echo "=== Phase 0: Retrain with post-v1 improvements ==="
 echo "  Changes: SUBS zero masking, float64 ELBO, importance sampling"
+echo "  Noise schedule: $NOISE_SCHEDULE"
 echo ""
 
-$TRAIN_CMD $COMMON
+$TRAIN_CMD $COMMON $NOISE_ARG
 
 # Find the latest checkpoint
 LATEST_OUTPUT=$(ls -td outputs/*/checkpoints/checkpoint_final.pt 2>/dev/null | head -1)
@@ -64,30 +69,30 @@ echo ""
 
 # Run 1: random + argmax + no remasking
 echo "--- Run 1/12: random + argmax ---"
-$EVAL_CMD $COMMON $CKPT \
+$EVAL_CMD $COMMON $NOISE_ARG $CKPT \
     eval.unmasking_mode=random eval.temperature=0.0 eval.top_p=null \
     eval.remasking.enabled=false
 
 # Run 2: random + top-p=0.9 + no remasking
 echo "--- Run 2/12: random + top-p=0.9 ---"
-$EVAL_CMD $COMMON $CKPT \
+$EVAL_CMD $COMMON $NOISE_ARG $CKPT \
     eval.unmasking_mode=random eval.top_p=0.9 \
     eval.remasking.enabled=false
 
 # Run 3: llada + argmax + no remasking
 echo "--- Run 3/12: llada + argmax ---"
-$EVAL_CMD $COMMON $CKPT \
+$EVAL_CMD $COMMON $NOISE_ARG $CKPT \
     eval.unmasking_mode=llada eval.temperature=0.0 eval.top_p=null \
     eval.remasking.enabled=false
 
 # Run 4: llada + top-p=0.9 + no remasking
 echo "--- Run 4/12: llada + top-p=0.9 ---"
-$EVAL_CMD $COMMON $CKPT \
+$EVAL_CMD $COMMON $NOISE_ARG $CKPT \
     eval.unmasking_mode=llada eval.top_p=0.9 \
     eval.remasking.enabled=false
 
 echo ""
-echo "Layer 1 complete. Review eval_results/ to pick winner unmasking mode."
+echo "Layer 1 complete. Review eval_results/$NOISE_SCHEDULE/ to pick winner unmasking mode."
 echo "Continuing with random unmasking for Layers 2-3."
 echo ""
 
@@ -101,7 +106,7 @@ echo ""
 RUN_NUM=5
 for ETA in 0.2 0.4 0.6 0.8 1.0; do
     echo "--- Run $RUN_NUM/12: cap eta=$ETA ---"
-    $EVAL_CMD $COMMON $CKPT \
+    $EVAL_CMD $COMMON $NOISE_ARG $CKPT \
         eval.unmasking_mode=random eval.top_p=0.9 \
         eval.remasking.enabled=true eval.remasking.strategy=cap \
         eval.remasking.eta=$ETA eval.remasking.t_switch=1.0
@@ -123,7 +128,7 @@ echo ""
 RUN_NUM=11
 for TSW in 0.3 0.5 0.7; do
     echo "--- Run $RUN_NUM/12: confidence t_switch=$TSW ---"
-    $EVAL_CMD $COMMON $CKPT \
+    $EVAL_CMD $COMMON $NOISE_ARG $CKPT \
         eval.unmasking_mode=random eval.top_p=0.9 \
         eval.remasking.enabled=true eval.remasking.strategy=confidence \
         eval.remasking.eta=0.0 eval.remasking.t_switch=$TSW
@@ -138,7 +143,7 @@ echo ""
 # Phase 4: Generate Comparison Table
 # =============================================================================
 echo "=== Phase 4: Generate comparison table ==="
-python scripts/compare.py
+python scripts/compare.py --schedule "$NOISE_SCHEDULE"
 echo ""
 
 # =============================================================================
@@ -146,17 +151,18 @@ echo ""
 # =============================================================================
 echo "============================================"
 echo "  All 12 runs complete!"
+echo "  Noise schedule: $NOISE_SCHEDULE"
 echo "  Finished: $(date)"
 echo "============================================"
 echo ""
 echo "Results:"
-echo "  - JSON files: eval_results/*.json"
-echo "  - Comparison: eval_results/comparison.md"
+echo "  - JSON files: eval_results/$NOISE_SCHEDULE/*.json"
+echo "  - Comparison: eval_results/$NOISE_SCHEDULE/comparison.md"
 echo ""
 echo "Next steps:"
 echo "  1. Review Layer 1 baselines — if llada wins, re-run L2/L3 with llada"
 echo "  2. Review Layer 2 — pick best eta, run argmax control (Run 10):"
-echo "     $EVAL_CMD $COMMON $CKPT \\"
+echo "     $EVAL_CMD $COMMON $NOISE_ARG $CKPT \\"
 echo "       eval.unmasking_mode=random eval.temperature=0.0 eval.top_p=null \\"
 echo "       eval.remasking.enabled=true eval.remasking.strategy=cap \\"
 echo "       eval.remasking.eta=<BEST> eval.remasking.t_switch=1.0"

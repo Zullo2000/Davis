@@ -528,7 +528,11 @@ def evaluate(cfg: DictConfig) -> None:
         remask_tag = "no_remask"
     method_name = f"{unmask_tag}_{sampling_tag}_{remask_tag}"
 
-    eval_result_path = _PROJECT_ROOT / "eval_results" / f"{method_name}.json"
+    # Save to schedule-specific subdirectory (e.g., eval_results/linear/)
+    schedule_tag = cfg.noise.type  # "linear", "loglinear", or "cosine"
+    eval_results_dir = _PROJECT_ROOT / "eval_results" / schedule_tag
+    eval_results_dir.mkdir(parents=True, exist_ok=True)
+    eval_result_path = eval_results_dir / f"{method_name}.json"
     save_eval_result(
         path=eval_result_path,
         method=method_name,

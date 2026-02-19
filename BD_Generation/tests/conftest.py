@@ -126,6 +126,14 @@ def linear_schedule():
 
 
 @pytest.fixture
+def loglinear_schedule():
+    """LogLinearSchedule with default parameters (eps=1e-3)."""
+    from bd_gen.diffusion.noise_schedule import LogLinearSchedule
+
+    return LogLinearSchedule(eps=1e-3)
+
+
+@pytest.fixture
 def cosine_schedule():
     """CosineSchedule with default parameters (eps=1e-3)."""
     from bd_gen.diffusion.noise_schedule import CosineSchedule

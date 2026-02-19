@@ -504,27 +504,52 @@ Auto-generated comparison tables with metric family grouping.
 
 ---
 
-## Post-v1 — Retraining After Previously Committed Changes
-Status: PENDING
+## Post-v1 — Retraining & Noise Schedule Comparison
+Status: IN PROGRESS (linear training running on jabiru)
 
 ### Summary
-Retrain the model to incorporate three code changes that are already committed
-but were never trained with. The v1 checkpoint (checkpoint_final.pt, 500 epochs)
-was trained before these changes were made.
+Retrain the model with three post-v1 code changes, then run the full 12-run
+experiment suite. Two noise schedules will be compared:
 
-### Changes taking effect
+1. **Linear schedule** (v1 default): `sigma(t) = t * sigma_max`, alpha decays
+   exponentially. Currently running on jabiru.
+2. **Log-linear schedule** (MDLM/ReMDM default): `alpha(t) = 1 - (1-eps)*t`,
+   masking probability increases linearly. Added in this phase.
+
+The log-linear schedule was identified as the standard for masked diffusion
+(used by MDLM, ReMDM, Block Diffusion, LLaDA). Our linear schedule concentrates
+99.3% masking by t=0.5, while log-linear reaches 50% — distributing denoising
+work far more evenly across timesteps.
+
+### Changes taking effect (both schedules)
 1. **SUBS Zero Masking Probabilities**: `BDDenoiser.forward()` now clamps MASK
-   and PAD logits to `-inf` before returning. During training, the softmax
-   denominator no longer wastes probability mass on impossible tokens, producing
-   cleaner gradients. (Commit: `47e17cb`)
+   and PAD logits to `-inf` before returning. (Commit: `47e17cb`)
 2. **Float64 ELBO Weights**: `ELBOLoss._compute_w()` now uses `alpha(t.double())`
-   for the ELBO weight computation. More precise loss weighting near `t → 0`
-   where catastrophic cancellation was possible in float32. (Commit: `47e17cb`)
+   for precision near `t → 0`. (Commit: `47e17cb`)
 3. **Importance Sampling Enabled**: `training.importance_sampling` set to `true`.
-   CDF-based timestep sampling concentrates more training near high-variance
-   `t → 0` region, reducing gradient noise. (Commit: `0760aca`)
+   (Commit: `0760aca`)
 
-### Training config
-- Same as v1: 500 epochs, lr=3e-4, AdamW, grad_clip=1.0, linear schedule
-- Expected time: ~17 min on RTX A5000
-- Output: new checkpoint (checkpoint_v2.pt)
+### Log-linear schedule implementation
+- `LogLinearSchedule` class in `noise_schedule.py` (matching MDLM codebase)
+- Config: `configs/noise/loglinear.yaml` (type: loglinear, eps: 1e-3)
+- 11 new tests (544 total pass)
+
+### Eval results directory structure
+Results saved per noise schedule:
+```
+eval_results/
+├── linear/          # 12 JSON files + comparison.md
+├── loglinear/       # 12 JSON files + comparison.md
+├── save_utils.py
+└── __init__.py
+```
+
+### Training plan
+1. **Linear**: `bash scripts/run_experiments.sh` → `eval_results/linear/`
+2. **Log-linear**: `bash scripts/run_experiments.sh loglinear` → `eval_results/loglinear/`
+3. Cross-schedule comparison of best methods
+
+### Training config (both runs)
+- 500 epochs, lr=3e-4, AdamW, grad_clip=1.0, importance_sampling=true
+- Server: Polytechnique `jabiru` (moved from `albatros` — disk full)
+- Expected time per run: ~70-90 min (17 min train + 50-70 min eval)

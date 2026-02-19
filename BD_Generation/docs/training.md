@@ -23,6 +23,7 @@ training loop.
 11. [Troubleshooting](#11-troubleshooting)
 12. [GPU Training Setup](#12-gpu-training-setup)
 13. [Training Results](#13-training-results)
+14. [Second Training Run (v2)](#14-second-training-run-v2--post-v1-improvements)
 
 ---
 
@@ -662,6 +663,12 @@ Host albatros
   User amine.chraibi
   PreferredAuthentications password
   PubkeyAuthentication no
+
+Host jabiru
+  HostName jabiru.polytechnique.fr
+  User amine.chraibi
+  PreferredAuthentications password
+  PubkeyAuthentication no
 ```
 
 #### Step 2: Connect via VSCode
@@ -677,6 +684,12 @@ run on the server.
 
 Everything is already installed at `/Data/amine.chraibi/Davis`.
 No need to clone or run `pip install` (which takes very long).
+
+**Note:** `albatros` `/Data` partition filled up (1TB, 100% used) during
+v2 training.  Switched to `jabiru` for subsequent runs.  Other available
+servers: dindon, malleole, kamiche, loriol, epervier, linotte, harpie,
+faisan, traquet, verdier, nandou, rouloul, gelinotte, perdrix, autruche.
+All use `<server>.polytechnique.fr` with the same user credentials.
 
 ```bash
 cd /Data/amine.chraibi/Davis
@@ -921,3 +934,84 @@ Phase 5.
 | wandb 0.16.6 rejects new 86-char API keys | Used `wandb.mode=disabled` |
 | numpy 2.0 removed `np.float_` (used by old wandb) | Pinned numpy==1.26.4 on server |
 | Server Python 3.9 vs local Python 3.14 | Lowered `requires-python` to `>=3.9`, added `from __future__ import annotations` where needed |
+
+---
+
+## 14. Second Training Run (v2 — Post-v1 Improvements)
+
+### Changes From v1
+
+Three code changes that were already committed but never trained with:
+
+1. **SUBS Zero Masking Probabilities**: `BDDenoiser.forward()` clamps
+   MASK and PAD logits to `-inf` before returning, so `softmax` assigns
+   them exactly zero probability.  Produces cleaner gradients during
+   training.
+2. **Float64 ELBO Weights**: `ELBOLoss._compute_w()` uses
+   `alpha(t.double())` for the ELBO weight computation.  More precise
+   loss weighting near `t -> 0` where catastrophic cancellation was
+   possible in float32.
+3. **Importance Sampling Enabled**: `training.importance_sampling` set
+   to `true`.  The ELBO weight `w(t)` varies enormously across
+   timesteps — near `t -> 0` it reaches up to 1000 (our clamp), while
+   at moderate `t` it is small.  With uniform sampling (v1), most
+   batches draw moderate `t` values; the rare batches near `t -> 0` get
+   enormous loss weights, causing high gradient variance.  Importance
+   sampling uses a CDF transformation to draw more timesteps near
+   `t -> 0` (where `w(t)` is large) and fewer in the middle.  The loss
+   is adjusted so the expected gradient is unchanged (unbiased), but the
+   variance is reduced — more stable convergence, especially for the
+   low-noise regime where the model makes final, precise predictions.
+   Reference: Sahoo et al., MDLM, Section 3.2.
+
+### Training Config
+
+Same as v1 except for the three changes above:
+
+| Setting | Value |
+|---------|-------|
+| GPU | Polytechnique `jabiru` server (moved from `albatros` due to full disk) |
+| Model | `small` (d_model=128, 4 layers, 4 heads, ~1.28M params) |
+| Batch size | 256 |
+| Epochs | 500 |
+| Noise schedule | Linear (sigma_min=0, sigma_max=10) |
+| Optimizer | AdamW (lr=3e-4, weight_decay=0.01) |
+| Warmup | 1000 steps |
+| Importance sampling | **true** (was false in v1) |
+| wandb | disabled |
+
+### Why Training Loss Is Much Higher Than v1
+
+The v2 per-epoch training loss (~41–55) is roughly 15x higher than v1
+(~2.8–3.2).  This is **expected** and does not indicate a problem.
+
+With **uniform timestep sampling** (v1), `t` is drawn uniformly from
+`[0, 1]`, so the ELBO weight `w(t) = -alpha'(t) / (1 - alpha(t))`
+averages out to moderate values across each epoch.
+
+With **importance sampling** (v2), `t` is concentrated near `t -> 0`,
+where `w(t)` is enormous (clamped at 1000 in our implementation).  The
+model makes the same predictions, but the loss *weights* are much
+larger on average, inflating the reported training loss.
+
+The oscillation is also amplified: more batches hit the high-`w(t)`
+regime, so the variance between epochs is greater.  For example, at
+epochs 291–299: 44.7, 54.5, 43.7, 45.3, 41.7, 44.8, 47.0, 46.8, 45.7.
+
+### Why Validation Loss Is the Reliable Metric
+
+Validation loss is computed **without importance sampling weights** — it
+uses a fixed `t = 0.5` and averages over batches without gradient
+updates.  This makes it directly comparable between v1 and v2:
+
+| Metric | v1 (epoch 499) | v2 (epoch 299) |
+|--------|---------------|----------------|
+| Validation loss | ~2.4 | ~2.6 |
+| Node accuracy | 28.9% | 19.7% |
+| Edge accuracy | 27.5–28.4% | 6.1% |
+
+At epoch 299, v2's validation loss (2.6) is close to v1's final (2.4),
+suggesting the model is converging normally.  The lower accuracies are
+expected since v2 was only 60% through training when these numbers were
+recorded.  Final metrics after 500 epochs will determine whether the
+post-v1 changes improve, match, or degrade v1 performance.

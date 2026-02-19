@@ -1,10 +1,10 @@
 """Generate comparison markdown from evaluation result JSONs.
 
 Usage:
-    python scripts/compare.py
-    python scripts/compare.py --results eval_results/mdlm_baseline.json eval_results/remdm_cap_eta0.1.json
-    python scripts/compare.py --output eval_results/comparison.md
-    python scripts/compare.py --primary-only
+    python scripts/compare.py --schedule linear
+    python scripts/compare.py --schedule loglinear
+    python scripts/compare.py --results eval_results/linear/foo.json eval_results/linear/bar.json
+    python scripts/compare.py --schedule linear --primary-only
 """
 
 from __future__ import annotations
@@ -26,17 +26,24 @@ def main() -> None:
         description="Generate comparison markdown from evaluation JSONs.",
     )
     parser.add_argument(
+        "--schedule",
+        type=str,
+        default=None,
+        help="Noise schedule subdirectory (e.g., 'linear', 'loglinear'). "
+        "Auto-discovers *.json in eval_results/<schedule>/.",
+    )
+    parser.add_argument(
         "--results",
         nargs="+",
         type=str,
         default=None,
-        help="Paths to result JSON files. Default: all *.json in eval_results/.",
+        help="Explicit paths to result JSON files (overrides --schedule).",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default=str(_PROJECT_ROOT / "eval_results" / "comparison.md"),
-        help="Output markdown path.",
+        default=None,
+        help="Output markdown path. Default: eval_results/<schedule>/comparison.md.",
     )
     parser.add_argument(
         "--primary-only",
@@ -45,12 +52,36 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Auto-discover JSON files if none specified
-    if args.results is None:
-        eval_dir = _PROJECT_ROOT / "eval_results"
-        result_paths = sorted(eval_dir.glob("*.json"))
-    else:
+    # Determine result paths
+    if args.results is not None:
         result_paths = [Path(p) for p in args.results]
+        output_path = args.output or str(
+            _PROJECT_ROOT / "eval_results" / "comparison.md"
+        )
+    elif args.schedule is not None:
+        eval_dir = _PROJECT_ROOT / "eval_results" / args.schedule
+        result_paths = sorted(eval_dir.glob("*.json"))
+        output_path = args.output or str(eval_dir / "comparison.md")
+    else:
+        # Fallback: try all schedule subdirectories
+        eval_root = _PROJECT_ROOT / "eval_results"
+        result_paths = []
+        for subdir in sorted(eval_root.iterdir()):
+            if subdir.is_dir() and subdir.name != "__pycache__":
+                sub_results = sorted(subdir.glob("*.json"))
+                if sub_results:
+                    print(f"\n=== Schedule: {subdir.name} ===")
+                    md = build_comparison_table(
+                        sub_results, primary_only=args.primary_only,
+                    )
+                    out = args.output or str(subdir / "comparison.md")
+                    Path(out).write_text(md)
+                    print(f"Comparison written to: {out}")
+        if not result_paths:
+            return
+        output_path = args.output or str(
+            _PROJECT_ROOT / "eval_results" / "comparison.md"
+        )
 
     if not result_paths:
         print("No result JSON files found.")
@@ -62,8 +93,8 @@ def main() -> None:
 
     md = build_comparison_table(result_paths, primary_only=args.primary_only)
 
-    Path(args.output).write_text(md)
-    print(f"\nComparison written to: {args.output}")
+    Path(output_path).write_text(md)
+    print(f"\nComparison written to: {output_path}")
 
 
 if __name__ == "__main__":

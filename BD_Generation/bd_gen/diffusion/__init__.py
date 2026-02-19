@@ -6,6 +6,7 @@ from bd_gen.diffusion.loss import ELBOLoss
 from bd_gen.diffusion.noise_schedule import (
     CosineSchedule,
     LinearSchedule,
+    LogLinearSchedule,
     NoiseSchedule,
     get_noise,
 )
@@ -15,6 +16,7 @@ from bd_gen.diffusion.sampling import sample
 __all__ = [
     "NoiseSchedule",
     "LinearSchedule",
+    "LogLinearSchedule",
     "CosineSchedule",
     "get_noise",
     "forward_mask",

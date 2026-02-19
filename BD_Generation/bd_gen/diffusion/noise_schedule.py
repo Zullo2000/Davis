@@ -100,6 +100,67 @@ class LinearSchedule(NoiseSchedule):
         return (sigma_t - self.sigma_min) / (self.sigma_max - self.sigma_min)
 
 
+class LogLinearSchedule(NoiseSchedule):
+    """Log-linear noise schedule: alpha_t = 1 - (1 - eps) * t.
+
+    This is the default schedule used by MDLM (Sahoo et al.) and ReMDM.
+    The masking probability (1 - alpha_t) increases **linearly** from 0
+    to (1 - eps), distributing the denoising work evenly across timesteps.
+
+    The name "log-linear" comes from sigma(t) = -log(alpha_t) being
+    a log transformation of the linear alpha curve.
+
+    Comparison with LinearSchedule:
+      - LinearSchedule: sigma grows linearly → alpha decays exponentially.
+        At t=0.5 with sigma_max=10, alpha ~ 0.007 (99.3% masked).
+      - LogLinearSchedule: alpha decreases linearly.
+        At t=0.5, alpha = 0.5 (50% masked). Much more even.
+
+    Reference: Sahoo et al., "Simple and Effective Masked Diffusion Language
+    Models" (MDLM), arXiv:2406.07524. Default schedule in their codebase.
+
+    Args:
+        eps: Small constant to prevent alpha from reaching exactly 0 at t=1.
+            Default 1e-3 (matching MDLM).
+    """
+
+    def __init__(self, eps: float = 1e-3) -> None:
+        super().__init__()
+        self.register_buffer("eps", torch.tensor(eps, dtype=torch.float32))
+
+    def sigma(self, t: Tensor) -> Tensor:
+        """sigma_t = -log(alpha_t), with clamping for numerical safety."""
+        alpha_t = self.alpha(t)
+        return -torch.log(torch.clamp(alpha_t, min=1e-8))
+
+    def alpha(self, t: Tensor) -> Tensor:
+        """alpha_t = 1 - (1 - eps) * t. Linear decrease from ~1 to eps."""
+        return 1.0 - (1.0 - self.eps) * t
+
+    def alpha_prime(self, t: Tensor) -> Tensor:
+        """d(alpha_t)/dt = -(1 - eps). Constant rate of change."""
+        return torch.full_like(t, -(1.0 - self.eps.item()))
+
+    def importance_sampling_transformation(self, t: Tensor) -> Tensor:
+        """MDLM importance sampling for log-linear schedule.
+
+        Maps uniform t to reduce ELBO gradient variance. Uses the same
+        CDF-based approach as LinearSchedule but adapted for the log-linear
+        sigma function.
+        """
+        # sigma(t) = -log(1 - (1-eps)*t), so we use the same log1p-exp trick
+        # For log-linear: f(t) = log(1 - alpha(t)) = log((1-eps)*t)
+        # The IS transformation maps through the CDF of |sigma'(t)|
+        s_min = -math.log(1.0 - self.eps.item())  # sigma at t~0
+        s_max = -math.log(self.eps.item())  # sigma at t~1
+        f_T = torch.log1p(-torch.exp(torch.tensor(-s_max)))
+        f_0 = torch.log1p(-torch.exp(torch.tensor(-s_min)))
+        sigma_t = -torch.log1p(-torch.exp(t * f_T + (1 - t) * f_0))
+        # Map sigma back to t: alpha = exp(-sigma), t = (1 - alpha) / (1 - eps)
+        alpha_t = torch.exp(-sigma_t)
+        return torch.clamp((1.0 - alpha_t) / (1.0 - self.eps), min=0.0, max=1.0)
+
+
 class CosineSchedule(NoiseSchedule):
     """Cosine noise schedule: alpha_t = eps + (1 - eps) * cos(t * pi/2).
 
@@ -134,8 +195,8 @@ def get_noise(config) -> NoiseSchedule:
 
     Args:
         config: An object with a ``type`` attribute. For linear schedules,
-            also requires ``sigma_min`` and ``sigma_max``. For cosine,
-            requires ``eps``.
+            also requires ``sigma_min`` and ``sigma_max``. For cosine and
+            loglinear, requires ``eps``.
 
     Returns:
         A NoiseSchedule instance.
@@ -148,10 +209,12 @@ def get_noise(config) -> NoiseSchedule:
             sigma_min=config.sigma_min,
             sigma_max=config.sigma_max,
         )
+    elif config.type == "loglinear":
+        return LogLinearSchedule(eps=config.eps)
     elif config.type == "cosine":
         return CosineSchedule(eps=config.eps)
     else:
         raise ValueError(
             f"Unknown noise schedule type: '{config.type}'. "
-            f"Supported: 'linear', 'cosine'."
+            f"Supported: 'linear', 'loglinear', 'cosine'."
         )
