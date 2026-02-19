@@ -1,0 +1,1045 @@
+{
+  "format_version": 2,
+  "method": "random_topp0.9_remdm_confidence_tsw0.7",
+  "timestamp": "2026-02-19T18:11:28.008877",
+  "config": {
+    "seeds": [
+      42,
+      123,
+      456,
+      789,
+      1337
+    ],
+    "num_samples": 1000,
+    "sampling_steps": 100,
+    "temperature": 0.0,
+    "top_p": 0.9,
+    "unmasking_mode": "random",
+    "remasking_enabled": true,
+    "remasking_strategy": "confidence",
+    "remasking_eta": 0.0,
+    "remasking_t_switch": 0.7,
+    "checkpoint": "checkpoint_final.pt"
+  },
+  "per_seed": {
+    "42": {
+      "eval/validity_rate": 0.98,
+      "eval/diversity": 1.0,
+      "eval/novelty": 1.0,
+      "eval/node_kl": 0.01516170508147865,
+      "eval/edge_kl": 0.5322004383763123,
+      "eval/num_rooms_kl": 0.0023714562435973065,
+      "eval/node_js": 0.0046963141401572695,
+      "eval/edge_js": 0.0776082829884961,
+      "eval/node_tv": 0.044504324421247715,
+      "eval/edge_tv": 0.24688025670713748,
+      "eval/rooms_w1": 0.051122698437258265,
+      "eval/conditional_edge_kl_mean": 4.585893713067203,
+      "eval/conditional_edge_kl_weighted": 0.817005597998602,
+      "eval/conditional_edge_js_mean": 0.19511111435610345,
+      "eval/conditional_edge_js_weighted": 0.08712998108440229,
+      "eval/conditional_edge_tv_mean": 0.4578073410036405,
+      "eval/conditional_edge_tv_weighted": 0.3233276970254216,
+      "eval/num_pairs_evaluated": 20.0,
+      "eval/conditional_edge_kl_topN_mean": 0.8728083464535177,
+      "eval/conditional_edge_kl_topN_weighted": 0.722265332276201,
+      "eval/conditional_edge_js_topN_mean": 0.08795673283719943,
+      "eval/conditional_edge_js_topN_weighted": 0.0812098941975895,
+      "eval/conditional_edge_tv_topN_mean": 0.3172895703897337,
+      "eval/conditional_edge_tv_topN_weighted": 0.31523361835251573,
+      "eval/topN": 20.0,
+      "eval/mmd_degree": 0.40205528050186384,
+      "eval/mmd_clustering": 0.27772161069269097,
+      "eval/mmd_spectral": 0.056069909021344455,
+      "eval/transitivity_score": 0.979,
+      "eval/h_consistent": 0.986,
+      "eval/v_consistent": 0.993,
+      "eval/degree_kl_per_type_mean": 4.423007732680295,
+      "eval/degree_kl_per_type_weighted": 2.31555687862981,
+      "eval/degree_js_per_type_mean": 0.30620179503370565,
+      "eval/degree_js_per_type_weighted": 0.23747691931767662,
+      "eval/degree_tv_per_type_mean": 0.6178003523744577,
+      "eval/degree_tv_per_type_weighted": 0.5372227578293607,
+      "eval/num_types_evaluated": 13.0,
+      "eval/mode_coverage": 0.18994413407821228,
+      "eval/mode_coverage_weighted": 0.8969518799319202,
+      "eval/num_training_modes": 716.0,
+      "eval/num_sample_modes": 251.0,
+      "eval/connected_rate": 1.0,
+      "eval/valid_types_rate": 0.98,
+      "eval/no_mask_rate": 1.0,
+      "validity_by_num_rooms": {
+        "4": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 1.0,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 1.0
+        },
+        "5": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 1.0,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 1.0
+        },
+        "6": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9748427672955975,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9748427672955975
+        },
+        "7": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9813829787234043,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9813829787234043
+        },
+        "8": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9776785714285714,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9776785714285714
+        }
+      },
+      "transitivity_by_num_rooms": {
+        "4": {
+          "transitivity_score": 1.0,
+          "h_consistent": 1.0,
+          "v_consistent": 1.0
+        },
+        "5": {
+          "transitivity_score": 0.9871794871794872,
+          "h_consistent": 1.0,
+          "v_consistent": 0.9871794871794872
+        },
+        "6": {
+          "transitivity_score": 0.9937106918238994,
+          "h_consistent": 0.9968553459119497,
+          "v_consistent": 0.9968553459119497
+        },
+        "7": {
+          "transitivity_score": 0.976063829787234,
+          "h_consistent": 0.9840425531914894,
+          "v_consistent": 0.9920212765957447
+        },
+        "8": {
+          "transitivity_score": 0.9598214285714286,
+          "h_consistent": 0.96875,
+          "v_consistent": 0.9910714285714286
+        }
+      },
+      "edge_present_rate_by_num_rooms": {
+        "4": 0.9583333333333334,
+        "5": 0.8358974358974354,
+        "6": 0.7752620545073371,
+        "7": 0.7499999999999987,
+        "8": 0.7278380102040813
+      }
+    },
+    "123": {
+      "eval/validity_rate": 0.986,
+      "eval/diversity": 1.0,
+      "eval/novelty": 1.0,
+      "eval/node_kl": 0.013159325602249859,
+      "eval/edge_kl": 0.582808491694954,
+      "eval/num_rooms_kl": 0.0010245880907637428,
+      "eval/node_js": 0.003987561601969,
+      "eval/edge_js": 0.08269026584914166,
+      "eval/node_tv": 0.03998312230552586,
+      "eval/edge_tv": 0.25773240939941405,
+      "eval/rooms_w1": 0.02191257929753988,
+      "eval/conditional_edge_kl_mean": 4.149899604112146,
+      "eval/conditional_edge_kl_weighted": 0.8069769767608005,
+      "eval/conditional_edge_js_mean": 0.2047935813829294,
+      "eval/conditional_edge_js_weighted": 0.09153350914500877,
+      "eval/conditional_edge_tv_mean": 0.4672463736796349,
+      "eval/conditional_edge_tv_weighted": 0.33444242072695596,
+      "eval/num_pairs_evaluated": 20.0,
+      "eval/conditional_edge_kl_topN_mean": 0.9067654950082987,
+      "eval/conditional_edge_kl_topN_weighted": 0.6933248906240728,
+      "eval/conditional_edge_js_topN_mean": 0.09322133029660216,
+      "eval/conditional_edge_js_topN_weighted": 0.08525341895786182,
+      "eval/conditional_edge_tv_topN_mean": 0.32949770400403355,
+      "eval/conditional_edge_tv_topN_weighted": 0.3269776594712,
+      "eval/topN": 20.0,
+      "eval/mmd_degree": 0.41258898339235484,
+      "eval/mmd_clustering": 0.29710194551373076,
+      "eval/mmd_spectral": 0.058260614269748046,
+      "eval/transitivity_score": 0.98,
+      "eval/h_consistent": 0.988,
+      "eval/v_consistent": 0.992,
+      "eval/degree_kl_per_type_mean": 4.146713572084862,
+      "eval/degree_kl_per_type_weighted": 2.519933621148576,
+      "eval/degree_js_per_type_mean": 0.29844023139588644,
+      "eval/degree_js_per_type_weighted": 0.2506082607485682,
+      "eval/degree_tv_per_type_mean": 0.6171330309908082,
+      "eval/degree_tv_per_type_weighted": 0.5588526205075677,
+      "eval/num_types_evaluated": 13.0,
+      "eval/mode_coverage": 0.20251396648044692,
+      "eval/mode_coverage_weighted": 0.9045334983753675,
+      "eval/num_training_modes": 716.0,
+      "eval/num_sample_modes": 266.0,
+      "eval/connected_rate": 1.0,
+      "eval/valid_types_rate": 0.986,
+      "eval/no_mask_rate": 1.0,
+      "validity_by_num_rooms": {
+        "4": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 1.0,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 1.0
+        },
+        "5": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.987012987012987,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.987012987012987
+        },
+        "6": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9899328859060402,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9899328859060402
+        },
+        "7": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9888888888888889,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9888888888888889
+        },
+        "8": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9769230769230769,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9769230769230769
+        }
+      },
+      "transitivity_by_num_rooms": {
+        "4": {
+          "transitivity_score": 1.0,
+          "h_consistent": 1.0,
+          "v_consistent": 1.0
+        },
+        "5": {
+          "transitivity_score": 0.987012987012987,
+          "h_consistent": 1.0,
+          "v_consistent": 0.987012987012987
+        },
+        "6": {
+          "transitivity_score": 0.9798657718120806,
+          "h_consistent": 0.9932885906040269,
+          "v_consistent": 0.9865771812080537
+        },
+        "7": {
+          "transitivity_score": 0.9833333333333333,
+          "h_consistent": 0.9861111111111112,
+          "v_consistent": 0.9972222222222222
+        },
+        "8": {
+          "transitivity_score": 0.9730769230769231,
+          "h_consistent": 0.9807692307692307,
+          "v_consistent": 0.9923076923076923
+        }
+      },
+      "edge_present_rate_by_num_rooms": {
+        "4": 0.9,
+        "5": 0.8389610389610387,
+        "6": 0.7876957494407156,
+        "7": 0.7612433862433853,
+        "8": 0.7243131868131867
+      }
+    },
+    "456": {
+      "eval/validity_rate": 0.982,
+      "eval/diversity": 1.0,
+      "eval/novelty": 1.0,
+      "eval/node_kl": 0.0143958083713397,
+      "eval/edge_kl": 0.5773536034206506,
+      "eval/num_rooms_kl": 0.00386957263659363,
+      "eval/node_js": 0.004404054016462683,
+      "eval/edge_js": 0.08333427312960855,
+      "eval/node_tv": 0.04175022997964489,
+      "eval/edge_tv": 0.25826492388083233,
+      "eval/rooms_w1": 0.05091257929753985,
+      "eval/conditional_edge_kl_mean": 4.665192687594491,
+      "eval/conditional_edge_kl_weighted": 0.8699643143445933,
+      "eval/conditional_edge_js_mean": 0.214322294691629,
+      "eval/conditional_edge_js_weighted": 0.09198875474232211,
+      "eval/conditional_edge_tv_mean": 0.47949122522301263,
+      "eval/conditional_edge_tv_weighted": 0.3319749747643397,
+      "eval/num_pairs_evaluated": 20.0,
+      "eval/conditional_edge_kl_topN_mean": 0.8695675984266578,
+      "eval/conditional_edge_kl_topN_weighted": 0.7543378116167033,
+      "eval/conditional_edge_js_topN_mean": 0.0912841567682077,
+      "eval/conditional_edge_js_topN_weighted": 0.08464994397412089,
+      "eval/conditional_edge_tv_topN_mean": 0.32482506663971245,
+      "eval/conditional_edge_tv_topN_weighted": 0.32302068268407536,
+      "eval/topN": 20.0,
+      "eval/mmd_degree": 0.4219326214775496,
+      "eval/mmd_clustering": 0.29277827986738925,
+      "eval/mmd_spectral": 0.05819292510651697,
+      "eval/transitivity_score": 0.974,
+      "eval/h_consistent": 0.98,
+      "eval/v_consistent": 0.993,
+      "eval/degree_kl_per_type_mean": 4.306727020716432,
+      "eval/degree_kl_per_type_weighted": 2.5186603622939523,
+      "eval/degree_js_per_type_mean": 0.29681021100957605,
+      "eval/degree_js_per_type_weighted": 0.2522644295378542,
+      "eval/degree_tv_per_type_mean": 0.6082669808075912,
+      "eval/degree_tv_per_type_weighted": 0.5646618471870515,
+      "eval/num_types_evaluated": 13.0,
+      "eval/mode_coverage": 0.17597765363128492,
+      "eval/mode_coverage_weighted": 0.8913662385888906,
+      "eval/num_training_modes": 716.0,
+      "eval/num_sample_modes": 258.0,
+      "eval/connected_rate": 1.0,
+      "eval/valid_types_rate": 0.982,
+      "eval/no_mask_rate": 1.0,
+      "validity_by_num_rooms": {
+        "4": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 1.0,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 1.0
+        },
+        "5": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9620253164556962,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9620253164556962
+        },
+        "6": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9782608695652174,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9782608695652174
+        },
+        "7": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9839142091152815,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9839142091152815
+        },
+        "8": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9887218045112782,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9887218045112782
+        }
+      },
+      "transitivity_by_num_rooms": {
+        "4": {
+          "transitivity_score": 1.0,
+          "h_consistent": 1.0,
+          "v_consistent": 1.0
+        },
+        "5": {
+          "transitivity_score": 0.9873417721518988,
+          "h_consistent": 0.9873417721518988,
+          "v_consistent": 1.0
+        },
+        "6": {
+          "transitivity_score": 0.9891304347826086,
+          "h_consistent": 0.9891304347826086,
+          "v_consistent": 1.0
+        },
+        "7": {
+          "transitivity_score": 0.9758713136729222,
+          "h_consistent": 0.9812332439678284,
+          "v_consistent": 0.9946380697050938
+        },
+        "8": {
+          "transitivity_score": 0.9511278195488722,
+          "h_consistent": 0.9661654135338346,
+          "v_consistent": 0.981203007518797
+        }
+      },
+      "edge_present_rate_by_num_rooms": {
+        "4": 0.8611111111111112,
+        "5": 0.8481012658227842,
+        "6": 0.7869565217391304,
+        "7": 0.759734456785394,
+        "8": 0.7246240601503761
+      }
+    },
+    "789": {
+      "eval/validity_rate": 0.978,
+      "eval/diversity": 1.0,
+      "eval/novelty": 1.0,
+      "eval/node_kl": 0.015356221890484977,
+      "eval/edge_kl": 0.5834542709780758,
+      "eval/num_rooms_kl": 0.001096827947322811,
+      "eval/node_js": 0.004791966037529024,
+      "eval/edge_js": 0.08326968384837821,
+      "eval/node_tv": 0.04143352630075958,
+      "eval/edge_tv": 0.2620512730439621,
+      "eval/rooms_w1": 0.01611728299551293,
+      "eval/conditional_edge_kl_mean": 3.8159052320986677,
+      "eval/conditional_edge_kl_weighted": 0.8350316715749665,
+      "eval/conditional_edge_js_mean": 0.16379865507792507,
+      "eval/conditional_edge_js_weighted": 0.0904901313886038,
+      "eval/conditional_edge_tv_mean": 0.4190267593034063,
+      "eval/conditional_edge_tv_weighted": 0.3288092920177324,
+      "eval/num_pairs_evaluated": 20.0,
+      "eval/conditional_edge_kl_topN_mean": 0.9037602191911427,
+      "eval/conditional_edge_kl_topN_weighted": 0.7580610807511202,
+      "eval/conditional_edge_js_topN_mean": 0.0903981680222328,
+      "eval/conditional_edge_js_topN_weighted": 0.08544129307365367,
+      "eval/conditional_edge_tv_topN_mean": 0.3190562672478408,
+      "eval/conditional_edge_tv_topN_weighted": 0.32269299640805593,
+      "eval/topN": 20.0,
+      "eval/mmd_degree": 0.4060771208220148,
+      "eval/mmd_clustering": 0.2969178171757012,
+      "eval/mmd_spectral": 0.05679200390568562,
+      "eval/transitivity_score": 0.979,
+      "eval/h_consistent": 0.989,
+      "eval/v_consistent": 0.989,
+      "eval/degree_kl_per_type_mean": 3.974153149250336,
+      "eval/degree_kl_per_type_weighted": 2.5467295600433544,
+      "eval/degree_js_per_type_mean": 0.2650574431231434,
+      "eval/degree_js_per_type_weighted": 0.24403947589340505,
+      "eval/degree_tv_per_type_mean": 0.5844427071428654,
+      "eval/degree_tv_per_type_weighted": 0.5512025768433609,
+      "eval/num_types_evaluated": 13.0,
+      "eval/mode_coverage": 0.1857541899441341,
+      "eval/mode_coverage_weighted": 0.8867863221414204,
+      "eval/num_training_modes": 716.0,
+      "eval/num_sample_modes": 255.0,
+      "eval/connected_rate": 1.0,
+      "eval/valid_types_rate": 0.978,
+      "eval/no_mask_rate": 1.0,
+      "validity_by_num_rooms": {
+        "4": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 1.0,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 1.0
+        },
+        "5": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 1.0,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 1.0
+        },
+        "6": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9907120743034056,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9907120743034056
+        },
+        "7": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9602272727272727,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9602272727272727
+        },
+        "8": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9803149606299213,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9803149606299213
+        }
+      },
+      "transitivity_by_num_rooms": {
+        "4": {
+          "transitivity_score": 1.0,
+          "h_consistent": 1.0,
+          "v_consistent": 1.0
+        },
+        "5": {
+          "transitivity_score": 0.9848484848484849,
+          "h_consistent": 0.9848484848484849,
+          "v_consistent": 1.0
+        },
+        "6": {
+          "transitivity_score": 0.9876160990712074,
+          "h_consistent": 0.9938080495356038,
+          "v_consistent": 0.9907120743034056
+        },
+        "7": {
+          "transitivity_score": 0.9772727272727273,
+          "h_consistent": 0.9971590909090909,
+          "v_consistent": 0.9801136363636364
+        },
+        "8": {
+          "transitivity_score": 0.968503937007874,
+          "h_consistent": 0.9724409448818898,
+          "v_consistent": 0.9960629921259843
+        }
+      },
+      "edge_present_rate_by_num_rooms": {
+        "4": 0.9,
+        "5": 0.8333333333333329,
+        "6": 0.7882352941176465,
+        "7": 0.7525703463203454,
+        "8": 0.7290494938132731
+      }
+    },
+    "1337": {
+      "eval/validity_rate": 0.981,
+      "eval/diversity": 1.0,
+      "eval/novelty": 1.0,
+      "eval/node_kl": 0.015056088440494554,
+      "eval/edge_kl": 0.5768649886212937,
+      "eval/num_rooms_kl": 0.0034687320666037386,
+      "eval/node_js": 0.004623927906375968,
+      "eval/edge_js": 0.08282228048781683,
+      "eval/node_tv": 0.04552259261532946,
+      "eval/edge_tv": 0.258573016885949,
+      "eval/rooms_w1": 0.043122698437258244,
+      "eval/conditional_edge_kl_mean": 4.763974743803737,
+      "eval/conditional_edge_kl_weighted": 0.8379907626256828,
+      "eval/conditional_edge_js_mean": 0.2026353598086075,
+      "eval/conditional_edge_js_weighted": 0.09189525995884762,
+      "eval/conditional_edge_tv_mean": 0.4643082784969547,
+      "eval/conditional_edge_tv_weighted": 0.3336456554231387,
+      "eval/num_pairs_evaluated": 20.0,
+      "eval/conditional_edge_kl_topN_mean": 0.9342771093154351,
+      "eval/conditional_edge_kl_topN_weighted": 0.7453315771996654,
+      "eval/conditional_edge_js_topN_mean": 0.0917456090401594,
+      "eval/conditional_edge_js_topN_weighted": 0.08588842116833634,
+      "eval/conditional_edge_tv_topN_mean": 0.3252260768542245,
+      "eval/conditional_edge_tv_topN_weighted": 0.3263162813357466,
+      "eval/topN": 20.0,
+      "eval/mmd_degree": 0.3980225569474205,
+      "eval/mmd_clustering": 0.28227535924178265,
+      "eval/mmd_spectral": 0.05944935526688233,
+      "eval/transitivity_score": 0.972,
+      "eval/h_consistent": 0.987,
+      "eval/v_consistent": 0.985,
+      "eval/degree_kl_per_type_mean": 4.686756374963205,
+      "eval/degree_kl_per_type_weighted": 2.5168621144214387,
+      "eval/degree_js_per_type_mean": 0.29301256606307385,
+      "eval/degree_js_per_type_weighted": 0.24381964463060748,
+      "eval/degree_tv_per_type_mean": 0.6060069166073225,
+      "eval/degree_tv_per_type_weighted": 0.5537815310221602,
+      "eval/num_types_evaluated": 13.0,
+      "eval/mode_coverage": 0.1941340782122905,
+      "eval/mode_coverage_weighted": 0.8925576357728608,
+      "eval/num_training_modes": 716.0,
+      "eval/num_sample_modes": 256.0,
+      "eval/connected_rate": 1.0,
+      "eval/valid_types_rate": 0.981,
+      "eval/no_mask_rate": 1.0,
+      "validity_by_num_rooms": {
+        "4": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.75,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.75
+        },
+        "5": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 1.0,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 1.0
+        },
+        "6": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9832214765100671,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9832214765100671
+        },
+        "7": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.977961432506887,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.977961432506887
+        },
+        "8": {
+          "connected": 1.0,
+          "consistent": 1.0,
+          "valid_types": 0.9793388429752066,
+          "no_mask_tokens": 1.0,
+          "no_out_of_range": 1.0,
+          "overall": 0.9793388429752066
+        }
+      },
+      "transitivity_by_num_rooms": {
+        "4": {
+          "transitivity_score": 1.0,
+          "h_consistent": 1.0,
+          "v_consistent": 1.0
+        },
+        "5": {
+          "transitivity_score": 0.967741935483871,
+          "h_consistent": 0.989247311827957,
+          "v_consistent": 0.978494623655914
+        },
+        "6": {
+          "transitivity_score": 0.9798657718120806,
+          "h_consistent": 0.9932885906040269,
+          "v_consistent": 0.9865771812080537
+        },
+        "7": {
+          "transitivity_score": 0.9834710743801653,
+          "h_consistent": 0.9917355371900827,
+          "v_consistent": 0.9917355371900827
+        },
+        "8": {
+          "transitivity_score": 0.9462809917355371,
+          "h_consistent": 0.9710743801652892,
+          "v_consistent": 0.9752066115702479
+        }
+      },
+      "edge_present_rate_by_num_rooms": {
+        "4": 0.8750000000000001,
+        "5": 0.8215053763440855,
+        "6": 0.7856823266219227,
+        "7": 0.761117670208578,
+        "8": 0.7318476977567879
+      }
+    }
+  },
+  "summary": {
+    "edge_present_rate_by_num_rooms/4": {
+      "mean": 0.8988888888888888,
+      "std": 0.033268455381288586
+    },
+    "edge_present_rate_by_num_rooms/5": {
+      "mean": 0.8355596900717354,
+      "std": 0.008619220005437581
+    },
+    "edge_present_rate_by_num_rooms/6": {
+      "mean": 0.7847663892853505,
+      "std": 0.004828715203810419
+    },
+    "edge_present_rate_by_num_rooms/7": {
+      "mean": 0.7569331719115402,
+      "std": 0.004712500194652729
+    },
+    "edge_present_rate_by_num_rooms/8": {
+      "mean": 0.7275344897475411,
+      "std": 0.002822712112585644
+    },
+    "eval/conditional_edge_js_mean": {
+      "mean": 0.1961322010634389,
+      "std": 0.017289828819090587
+    },
+    "eval/conditional_edge_js_topN_mean": {
+      "mean": 0.09092119939288028,
+      "std": 0.0017414715198084383
+    },
+    "eval/conditional_edge_js_topN_weighted": {
+      "mean": 0.08448859427431245,
+      "std": 0.0016868915229377654
+    },
+    "eval/conditional_edge_js_weighted": {
+      "mean": 0.09060752726383692,
+      "std": 0.0018182737146536989
+    },
+    "eval/conditional_edge_kl_mean": {
+      "mean": 4.396173196135249,
+      "std": 0.3580516532603566
+    },
+    "eval/conditional_edge_kl_topN_mean": {
+      "mean": 0.8974357536790103,
+      "std": 0.023947741798485224
+    },
+    "eval/conditional_edge_kl_topN_weighted": {
+      "mean": 0.7346641384935525,
+      "std": 0.024128524114578324
+    },
+    "eval/conditional_edge_kl_weighted": {
+      "mean": 0.833393864660929,
+      "std": 0.02157609289456711
+    },
+    "eval/conditional_edge_tv_mean": {
+      "mean": 0.45757599554132977,
+      "std": 0.020519328811554646
+    },
+    "eval/conditional_edge_tv_topN_mean": {
+      "mean": 0.32317893702710904,
+      "std": 0.004438657134319907
+    },
+    "eval/conditional_edge_tv_topN_weighted": {
+      "mean": 0.32284824765031866,
+      "std": 0.004174103874168607
+    },
+    "eval/conditional_edge_tv_weighted": {
+      "mean": 0.3304400079915176,
+      "std": 0.004047117690898888
+    },
+    "eval/connected_rate": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "eval/degree_js_per_type_mean": {
+      "mean": 0.29190444932507703,
+      "std": 0.014093876003470058
+    },
+    "eval/degree_js_per_type_weighted": {
+      "mean": 0.2456417460256223,
+      "std": 0.005311834403245648
+    },
+    "eval/degree_kl_per_type_mean": {
+      "mean": 4.307471569939026,
+      "std": 0.24254913977222575
+    },
+    "eval/degree_kl_per_type_weighted": {
+      "mean": 2.483548507307426,
+      "std": 0.08471074078220922
+    },
+    "eval/degree_tv_per_type_mean": {
+      "mean": 0.606729997584609,
+      "std": 0.01208622635884089
+    },
+    "eval/degree_tv_per_type_weighted": {
+      "mean": 0.5531442666779002,
+      "std": 0.009196854609067178
+    },
+    "eval/diversity": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "eval/edge_js": {
+      "mean": 0.08194495726068826,
+      "std": 0.0021825225678439816
+    },
+    "eval/edge_kl": {
+      "mean": 0.5705363586182572,
+      "std": 0.01935792796347773
+    },
+    "eval/edge_tv": {
+      "mean": 0.256700375983459,
+      "std": 0.005139776823905565
+    },
+    "eval/h_consistent": {
+      "mean": 0.986,
+      "std": 0.003162277660168382
+    },
+    "eval/mmd_clustering": {
+      "mean": 0.28935900249825897,
+      "std": 0.007929529537332334
+    },
+    "eval/mmd_degree": {
+      "mean": 0.40813531262824065,
+      "std": 0.00841037081688191
+    },
+    "eval/mmd_spectral": {
+      "mean": 0.057752961514035486,
+      "std": 0.0011903895384275318
+    },
+    "eval/mode_coverage": {
+      "mean": 0.18966480446927375,
+      "std": 0.008806638419237116
+    },
+    "eval/mode_coverage_weighted": {
+      "mean": 0.8944391149620919,
+      "std": 0.005995970903672199
+    },
+    "eval/no_mask_rate": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "eval/node_js": {
+      "mean": 0.004500764740498789,
+      "std": 0.00028668357262605273
+    },
+    "eval/node_kl": {
+      "mean": 0.014625829877209548,
+      "std": 0.0008011618863281927
+    },
+    "eval/node_tv": {
+      "mean": 0.042638759124501505,
+      "std": 0.0020538406264473583
+    },
+    "eval/novelty": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "eval/num_pairs_evaluated": {
+      "mean": 20.0,
+      "std": 0.0
+    },
+    "eval/num_rooms_kl": {
+      "mean": 0.0023662353969762457,
+      "std": 0.0011736236012710782
+    },
+    "eval/num_sample_modes": {
+      "mean": 257.2,
+      "std": 4.955804677345546
+    },
+    "eval/num_training_modes": {
+      "mean": 716.0,
+      "std": 0.0
+    },
+    "eval/num_types_evaluated": {
+      "mean": 13.0,
+      "std": 0.0
+    },
+    "eval/rooms_w1": {
+      "mean": 0.03663756769302183,
+      "std": 0.014788909743929633
+    },
+    "eval/topN": {
+      "mean": 20.0,
+      "std": 0.0
+    },
+    "eval/transitivity_score": {
+      "mean": 0.9768000000000001,
+      "std": 0.0031874754901018484
+    },
+    "eval/v_consistent": {
+      "mean": 0.9904,
+      "std": 0.003072458299147446
+    },
+    "eval/valid_types_rate": {
+      "mean": 0.9814,
+      "std": 0.002653299832284322
+    },
+    "eval/validity_rate": {
+      "mean": 0.9814,
+      "std": 0.002653299832284322
+    },
+    "transitivity_by_num_rooms/4/h_consistent": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "transitivity_by_num_rooms/4/transitivity_score": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "transitivity_by_num_rooms/4/v_consistent": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "transitivity_by_num_rooms/5/h_consistent": {
+      "mean": 0.9922875137656681,
+      "std": 0.006449918247426682
+    },
+    "transitivity_by_num_rooms/5/transitivity_score": {
+      "mean": 0.9828249333353458,
+      "std": 0.007595990397531734
+    },
+    "transitivity_by_num_rooms/5/v_consistent": {
+      "mean": 0.9905374195696777,
+      "std": 0.008340349213371734
+    },
+    "transitivity_by_num_rooms/6/h_consistent": {
+      "mean": 0.9932742022876431,
+      "std": 0.0024609268873797547
+    },
+    "transitivity_by_num_rooms/6/transitivity_score": {
+      "mean": 0.9860377538603752,
+      "std": 0.005424325777317151
+    },
+    "transitivity_by_num_rooms/6/v_consistent": {
+      "mean": 0.9921443565262924,
+      "std": 0.005439538028027567
+    },
+    "transitivity_by_num_rooms/7/h_consistent": {
+      "mean": 0.9880563072739206,
+      "std": 0.005706936227253475
+    },
+    "transitivity_by_num_rooms/7/transitivity_score": {
+      "mean": 0.9792024556892767,
+      "std": 0.0034628481654875873
+    },
+    "transitivity_by_num_rooms/7/v_consistent": {
+      "mean": 0.9911461484153559,
+      "std": 0.005864157873581402
+    },
+    "transitivity_by_num_rooms/8/h_consistent": {
+      "mean": 0.9718399938700489,
+      "std": 0.004948282574274612
+    },
+    "transitivity_by_num_rooms/8/transitivity_score": {
+      "mean": 0.959762219988127,
+      "std": 0.010099493319927459
+    },
+    "transitivity_by_num_rooms/8/v_consistent": {
+      "mean": 0.9871703464188301,
+      "std": 0.007738604492944813
+    },
+    "validity_by_num_rooms/4/connected": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/4/consistent": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/4/no_mask_tokens": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/4/no_out_of_range": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/4/overall": {
+      "mean": 0.95,
+      "std": 0.09999999999999999
+    },
+    "validity_by_num_rooms/4/valid_types": {
+      "mean": 0.95,
+      "std": 0.09999999999999999
+    },
+    "validity_by_num_rooms/5/connected": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/5/consistent": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/5/no_mask_tokens": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/5/no_out_of_range": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/5/overall": {
+      "mean": 0.9898076606937366,
+      "std": 0.014773761836071785
+    },
+    "validity_by_num_rooms/5/valid_types": {
+      "mean": 0.9898076606937366,
+      "std": 0.014773761836071785
+    },
+    "validity_by_num_rooms/6/connected": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/6/consistent": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/6/no_mask_tokens": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/6/no_out_of_range": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/6/overall": {
+      "mean": 0.9833940147160656,
+      "std": 0.006258012681054694
+    },
+    "validity_by_num_rooms/6/valid_types": {
+      "mean": 0.9833940147160656,
+      "std": 0.006258012681054694
+    },
+    "validity_by_num_rooms/7/connected": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/7/consistent": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/7/no_mask_tokens": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/7/no_out_of_range": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/7/overall": {
+      "mean": 0.9784749563923467,
+      "std": 0.009795240885511364
+    },
+    "validity_by_num_rooms/7/valid_types": {
+      "mean": 0.9784749563923467,
+      "std": 0.009795240885511364
+    },
+    "validity_by_num_rooms/8/connected": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/8/consistent": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/8/no_mask_tokens": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/8/no_out_of_range": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "validity_by_num_rooms/8/overall": {
+      "mean": 0.9805954512936108,
+      "std": 0.0042353247280703275
+    },
+    "validity_by_num_rooms/8/valid_types": {
+      "mean": 0.9805954512936108,
+      "std": 0.0042353247280703275
+    }
+  },
+  "denoising": {
+    "denoise/acc_node@t=0.1": 0.8307280035730237,
+    "denoise/acc_edge@t=0.1": 0.8009353078721746,
+    "denoise/ce_node@t=0.1": 0.5119483048173666,
+    "denoise/ce_edge@t=0.1": 0.597179721466564,
+    "denoise/acc_node@t=0.3": 0.6984948259642522,
+    "denoise/acc_edge@t=0.3": 0.6721463063803554,
+    "denoise/ce_node@t=0.3": 0.8450462039864972,
+    "denoise/ce_edge@t=0.3": 0.9393285384688166,
+    "denoise/acc_node@t=0.5": 0.5514407092722571,
+    "denoise/acc_edge@t=0.5": 0.5417940240783482,
+    "denoise/ce_node@t=0.5": 1.1695671053359022,
+    "denoise/ce_edge@t=0.5": 1.3395945056617597,
+    "denoise/acc_node@t=0.7": 0.4166339484360686,
+    "denoise/acc_edge@t=0.7": 0.3978363248622712,
+    "denoise/ce_node@t=0.7": 1.4812802535797067,
+    "denoise/ce_edge@t=0.7": 1.7793003975105726,
+    "denoise/acc_node@t=0.9": 0.28332398102331274,
+    "denoise/acc_edge@t=0.9": 0.27394885132206326,
+    "denoise/ce_node@t=0.9": 1.7869598430704963,
+    "denoise/ce_edge@t=0.9": 2.1857993547152685
+  }
+}

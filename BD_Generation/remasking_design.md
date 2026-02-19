@@ -492,3 +492,126 @@ Data already collected; just compare metrics.
 - Temperature grid (0.7, 0.9) with top-p
 - Rescale strategy testing
 - Combining cap/rescale base with confidence redistribution
+
+---
+
+## 11. Experiment Results & Analysis
+
+> **Date:** 2026-02-19
+> **Schedule:** Log-linear (with importance sampling)
+> **Total runs:** 20 (4 baselines + 8 random remasking + 8 llada remasking)
+> **Full data:** `eval_results/loglinear/comparison.md` (auto-generated, all 20 methods)
+
+### 11.1 What we ran
+
+The original plan (Section 10) called for running Layers 2-3 with only the
+"winning" unmasking mode from Layer 1. Layer 1 did not produce a clear winner
+— random and llada each dominate different metric families — so we ran Layers
+2-3 with **both** unmasking modes (20 runs total instead of ~13).
+
+Run 10 (argmax control) was skipped: llada+argmax produces only 5 unique
+archetypes (complete mode collapse from deterministic decoding), making it
+uninformative as a remasking control. The top-p synergy argument is already
+well-supported by comparing baselines (argmax diversity 0.005 vs top-p 0.945).
+
+### 11.2 The fundamental tradeoff: structure vs distribution
+
+The single most important finding is that **unmasking mode** (random vs llada)
+dominates all other choices (remasking strategy, eta, t_switch). The two modes
+create distinct operating regimes:
+
+**llada unmasking** resolves high-confidence positions first. This produces
+graphs with correct degree sequences (MMD-Degree 0.035-0.050) and consistent
+spatial relationships (transitivity 98-100%), but with a biased edge type
+distribution (Edge JS 0.106-0.214) and limited diversity (mode coverage
+67-73%). The model "plays it safe" — generating structurally sound but
+repetitive graphs.
+
+**random unmasking** treats all positions equally. This better matches the
+training data distribution (Edge JS 0.035-0.082, Node JS 0.004-0.006) and
+produces much higher diversity (mode coverage 88-91%, 2x more archetypes),
+but with worse graph structure (MMD-Degree 0.302-0.408, 10x worse) and
+lower validity (97.9-99.7% vs 99.8-100%).
+
+### 11.3 What remasking does to each mode
+
+**For random unmasking**, remasking:
+- Improves Node JS (0.006 → 0.004) and mode coverage (88.5% → 90.7%)
+- Doubles unique archetypes (103 → 242)
+- Costs 2x Edge JS (0.035 → 0.070) and 1.7% validity (99.7% → 98.0%)
+- Worsens already-poor structure (MMD 0.302 → 0.404)
+- **Net effect:** more diverse, slightly worse distribution match on edges
+
+**For llada unmasking**, remasking:
+- Dramatically improves diversity (0.945 → 0.987) and archetypes (29 → 112, 4x)
+- Improves graph structure (MMD-Degree 0.050 → 0.037, best of any method)
+- Costs 2x distribution match: Node JS (0.023 → 0.043), Edge JS (0.106 → 0.197)
+- Minimal validity cost (100% → 99.8%)
+- **Net effect:** much more diverse while maintaining structural quality
+
+Remasking's benefit is proportional to how much room there is to improve.
+llada baseline has low diversity (the bottleneck), so remasking provides a
+large diversity lift. Random baseline has poor structure, but remasking
+can't fix structural problems — it just re-draws from the same distribution.
+
+### 11.4 Cap vs confidence: minimal difference
+
+Within each unmasking mode, cap and confidence remasking produce very similar
+results. The choice of remasking strategy matters far less than the choice of
+unmasking mode.
+
+**Cap eta sweep** (both modes): eta saturates at 0.4 — values 0.4 through 1.0
+produce nearly identical metrics. The remasking budget hits a ceiling where
+additional remasking cycles stop changing outcomes (re-masked positions get
+similar predictions from similar context).
+
+**Confidence t_switch sweep** (both modes): t_switch values 0.3, 0.5, 0.7
+produce similar results. The small differences:
+- tsw=0.3 (conservative, remask only last 30%): slightly better conditional metrics
+- tsw=0.5: slightly better MMD (0.035 best of all methods for llada)
+- tsw=0.7 (aggressive): slightly more archetypes but worse Edge JS
+
+### 11.5 Pareto front — candidate methods for final selection
+
+No single method wins all metrics. The next step is to choose based on
+downstream priorities. The Pareto-optimal candidates are:
+
+| Method | Validity | Edge JS | MMD-Deg | Mode cov | Archetypes | Profile |
+|---|:---:|:---:|:---:|:---:|:---:|---|
+| llada_topp (no remask) | **100%** | 0.106 | 0.050 | 69.6% | 29 | Safest structure, low diversity |
+| llada + cap eta=0.4 | 99.8% | 0.197 | **0.037** | 71.4% | 112 | Best structure + improved diversity |
+| llada + conf tsw=0.5 | 99.8% | 0.207 | **0.035** | 72.7% | 120 | Best MMD overall |
+| random_topp (no remask) | 99.7% | **0.035** | 0.302 | 88.5% | 103 | Best distribution match |
+| random + cap eta=0.2 | 98.3% | 0.070 | 0.400 | 89.6% | 239 | Best coverage + good distribution |
+| random + cap eta=0.4 | 98.0% | 0.073 | 0.404 | **90.7%** | **242** | Maximum diversity |
+
+### 11.6 Initial intuitions for method selection
+
+These are preliminary observations to guide tomorrow's decision:
+
+1. **If structural correctness is paramount** (e.g., downstream floorplan
+   generation requires valid spatial relationships): llada + cap eta=0.4 or
+   llada + conf tsw=0.5. The 4x diversity improvement over llada baseline
+   with minimal validity loss and improved MMD makes this attractive.
+
+2. **If distributional fidelity is paramount** (e.g., generated samples must
+   statistically resemble the training data): random_topp without remasking.
+   Remasking helps coverage but hurts Edge JS. The baseline already has
+   excellent JS divergence.
+
+3. **If maximum coverage/diversity is paramount** (e.g., exploring the full
+   design space): random + cap eta=0.4. Best mode coverage and most unique
+   archetypes, at the cost of ~2% validity and doubled Edge JS.
+
+4. **The llada Edge JS problem** deserves investigation. llada's high Edge JS
+   (0.106+) likely comes from its biased unmasking order: high-confidence
+   positions (often common edge types) unmask first, leaving ambiguous positions
+   for later. This creates a systematic edge-type distribution skew that
+   remasking worsens (more re-drawing from skewed context). A hybrid approach
+   (llada for initial steps, random for final steps) might combine their
+   strengths.
+
+5. **Remasking is most valuable for llada** — it addresses llada's main weakness
+   (low diversity) while preserving its main strength (structural quality).
+   For random, remasking provides marginal coverage gains at meaningful
+   distribution cost.

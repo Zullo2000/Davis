@@ -505,51 +505,189 @@ Auto-generated comparison tables with metric family grouping.
 ---
 
 ## Post-v1 — Retraining & Noise Schedule Comparison
-Status: IN PROGRESS (linear training running on jabiru)
+Status: COMPLETE
 
 ### Summary
-Retrain the model with three post-v1 code changes, then run the full 12-run
-experiment suite. Two noise schedules will be compared:
-
-1. **Linear schedule** (v1 default): `sigma(t) = t * sigma_max`, alpha decays
-   exponentially. Currently running on jabiru.
-2. **Log-linear schedule** (MDLM/ReMDM default): `alpha(t) = 1 - (1-eps)*t`,
-   masking probability increases linearly. Added in this phase.
-
-The log-linear schedule was identified as the standard for masked diffusion
-(used by MDLM, ReMDM, Block Diffusion, LLaDA). Our linear schedule concentrates
-99.3% masking by t=0.5, while log-linear reaches 50% — distributing denoising
-work far more evenly across timesteps.
+Retrained the model with three post-v1 code changes (SUBS zero masking, float64
+ELBO, importance sampling), then ran the full 12-run experiment suite with both
+linear and log-linear noise schedules. 500 epochs each on jabiru.
 
 ### Changes taking effect (both schedules)
-1. **SUBS Zero Masking Probabilities**: `BDDenoiser.forward()` now clamps MASK
-   and PAD logits to `-inf` before returning. (Commit: `47e17cb`)
-2. **Float64 ELBO Weights**: `ELBOLoss._compute_w()` now uses `alpha(t.double())`
-   for precision near `t → 0`. (Commit: `47e17cb`)
-3. **Importance Sampling Enabled**: `training.importance_sampling` set to `true`.
+1. **SUBS Zero Masking Probabilities**: MASK/PAD logits clamped to `-inf` in
+   `BDDenoiser.forward()`. (Commit: `47e17cb`)
+2. **Float64 ELBO Weights**: precision fix near `t → 0`. (Commit: `47e17cb`)
+3. **Importance Sampling Enabled**: `training.importance_sampling=true`.
    (Commit: `0760aca`)
+
+### Finding: importance sampling + linear schedule = broken
+
+IS concentrates training timesteps where w(t) is high — near t→0. With the
+linear schedule, alpha(t→0) ≈ 1 (almost nothing masked), so the model trains
+mostly on trivially easy inputs and barely sees heavily-masked data. During
+generation (starting from t=1, fully masked), the model operates in an
+untrained regime.
+
+**v1 vs v2 comparison (random+argmax):**
+
+| Metric | v1 (no IS) | v2 linear+IS | v2 loglinear+IS |
+|---|:---:|:---:|:---:|
+| Validity | 99.3% | 94.6% (-4.7%) | **99.9%** (+0.6%) |
+| Edge JS | 0.042 | 0.107 (2.5x worse) | **0.035** (17% better) |
+| Node JS | 0.016 | 0.020 (25% worse) | 0.017 (~same) |
+
+**Model quality (denoising accuracy):**
+
+| Timestep | Linear+IS | Log-linear+IS |
+|---|:---:|:---:|
+| acc_edge@t=0.1 | 0.47 | **0.79** |
+| acc_edge@t=0.5 | 0.03 | **0.54** (+1700%) |
+| acc_node@t=0.5 | 0.16 | **0.56** (+250%) |
+
+The linear model was essentially untrained at medium-high masking rates. Log-
+linear distributes masking uniformly (alpha(0.5)=0.5 vs 0.007), making IS
+concentrate training where predictions are meaningfully difficult.
+
+**Impact on llada unmasking:**
+- Linear+IS: 30% validity (cascading confidence errors at high masking rates)
+- Log-linear+IS: **100% validity** (confidence scores are reliable at all t)
+
+### Schedule conclusion
+**Log-linear is the correct schedule** for our pipeline with IS enabled.
+Linear schedule is only viable without IS (v1 configuration). All subsequent
+work uses log-linear.
 
 ### Log-linear schedule implementation
 - `LogLinearSchedule` class in `noise_schedule.py` (matching MDLM codebase)
 - Config: `configs/noise/loglinear.yaml` (type: loglinear, eps: 1e-3)
 - 11 new tests (544 total pass)
-
-### Eval results directory structure
-Results saved per noise schedule:
-```
-eval_results/
-├── linear/          # 12 JSON files + comparison.md
-├── loglinear/       # 12 JSON files + comparison.md
-├── save_utils.py
-└── __init__.py
-```
-
-### Training plan
-1. **Linear**: `bash scripts/run_experiments.sh` → `eval_results/linear/`
-2. **Log-linear**: `bash scripts/run_experiments.sh loglinear` → `eval_results/loglinear/`
-3. Cross-schedule comparison of best methods
+- Eval/compare scripts parameterized by `--schedule` argument
+- Results: `eval_results/linear/` and `eval_results/loglinear/` (12 JSON + comparison.md each)
 
 ### Training config (both runs)
 - 500 epochs, lr=3e-4, AdamW, grad_clip=1.0, importance_sampling=true
 - Server: Polytechnique `jabiru` (moved from `albatros` — disk full)
-- Expected time per run: ~70-90 min (17 min train + 50-70 min eval)
+- Checkpoints: `outputs/2026-02-19_15-24-27/` (linear), `outputs/2026-02-19_16-58-23/` (loglinear)
+
+---
+
+## Post-v1 — Remasking Design Comparison (Log-Linear Schedule)
+Status: COMPLETE (20 runs total; final method selection pending)
+
+### Experiment design
+Layered experiment plan from `remasking_design.md` Section 10. All runs use
+log-linear schedule, 100 sampling steps, 1000 samples, 5 seeds.
+
+- **Layer 1**: 4 baselines (random/llada x argmax/top-p, no remasking)
+- **Layer 2**: 5 cap eta sweep (0.2, 0.4, 0.6, 0.8, 1.0) — run with both random+top-p and llada+top-p
+- **Layer 3**: 3 confidence + t_switch sweep (0.3, 0.5, 0.7) — run with both random+top-p and llada+top-p
+- **Run 10**: skipped (argmax mode-collapses with llada; top-p synergy already demonstrated)
+
+Total: 20 runs (4 baselines + 8 random remasking + 8 llada remasking).
+Full results: `eval_results/loglinear/comparison.md` (auto-generated, 20 methods).
+
+### Layer 1 results — llada vs random baselines (log-linear)
+
+| Metric | llada_argmax | llada_topp | random_argmax | random_topp |
+|---|:---:|:---:|:---:|:---:|
+| Validity | **100%** | **100%** | 99.9% | 99.7% |
+| Node JS | 0.036 | 0.023 | 0.017 | **0.006** |
+| Edge JS | 0.196 | 0.106 | 0.053 | **0.035** |
+| Spatial transit. | **100%** | 99.9% | 99.7% | 97.8% |
+| MMD-Degree | 0.121 | **0.050** | 0.104 | 0.302 |
+| Type-cond deg JS | 0.128 | **0.033** | 0.069 | 0.161 |
+| Diversity | 0.005 | 0.945 | 0.997 | **1.0** |
+| Mode cov (wt) | 14.5% | 69.6% | 75.0% | **88.5%** |
+
+**Two strong candidates, different strengths:**
+- **random+topp**: best distribution match (JS), best diversity/coverage
+- **llada_topp**: best validity (100%), best structural quality (MMD, transitivity,
+  type-conditional degree)
+
+llada_argmax mode-collapses (5 archetypes — fully deterministic process produces
+one output per num_rooms). Not a viable standalone method.
+
+### Layer 2 results — cap eta sweep (random+top-p)
+
+| Metric | no_remask | eta=0.2 | eta=0.4 | eta=0.6-1.0 |
+|---|:---:|:---:|:---:|:---:|
+| Validity | **99.7%** | 98.3% | 98.0% | ~97.9% |
+| Node JS | 0.0063 | 0.0045 | **0.0042** | ~0.0044 |
+| Edge JS | **0.035** | 0.070 | 0.073 | ~0.073 |
+| Spatial transit. | 97.8% | 96.9% | **97.3%** | ~97.2% |
+| Mode cov (wt) | 88.5% | 89.6% | **90.7%** | ~90.2% |
+| Unique archetypes | 103 | **239** | 242 | ~241 |
+
+Key findings (random):
+- Eta values 0.4-1.0 all plateau — remasking budget saturates early
+- Node JS improves with remasking (0.006 → 0.004)
+- Edge JS doubles (0.035 → 0.070) — main cost
+- Structural damage minimal (transitivity -0.5-1%)
+- Best eta: 0.2 (least Edge JS damage) or 0.4 (best Node JS + coverage)
+
+### Layer 2 results — cap eta sweep (llada+top-p)
+
+| Metric | no_remask | eta=0.2 | eta=0.4 | eta=0.6-1.0 |
+|---|:---:|:---:|:---:|:---:|
+| Validity | **100%** | 99.9% | 99.8% | ~99.8% |
+| Node JS | **0.023** | 0.050 | 0.043 | ~0.044 |
+| Edge JS | **0.106** | 0.214 | 0.197 | ~0.199 |
+| MMD-Degree | 0.050 | 0.041 | 0.037 | **~0.036** |
+| Type-cond deg JS | **0.033** | 0.031 | 0.038 | ~0.038 |
+| Diversity | 0.945 | 0.971 | **0.987** | ~0.987 |
+| Mode cov (wt) | 69.6% | 67.2% | **71.4%** | ~70.6% |
+| Unique archetypes | 29 | 99 | **112** | ~112 |
+
+Key findings (llada):
+- Remasking improves diversity (0.945 → 0.987) and archetypes (29 → 112, 4x)
+- Remasking hurts distribution match: Node JS doubles (0.023 → 0.043), Edge JS
+  doubles (0.106 → 0.197) — remasking disrupts llada's careful ordering
+- Remasking improves graph structure: MMD-Degree 0.050 → 0.037 (best of any method)
+- Eta saturates at 0.4 (same pattern as random)
+- Validity stays near-perfect (99.8%), much higher than random+remasking (98%)
+
+### Layer 3 results — confidence + t_switch (random+top-p)
+
+All three t_switch values (0.3, 0.5, 0.7) produce nearly identical results,
+comparable to cap eta=0.4-1.0. t_switch has minimal effect. Confidence
+remasking is slightly worse than cap on Edge JS (0.078-0.082 vs 0.070-0.073).
+
+### Layer 3 results — confidence + t_switch (llada+top-p)
+
+| Metric | tsw=0.3 | tsw=0.5 | tsw=0.7 |
+|---|:---:|:---:|:---:|
+| Validity | **99.9%** | 99.8% | 99.8% |
+| MMD-Degree | 0.039 | **0.035** | 0.037 |
+| MMD-Clustering | 0.030 | **0.027** | 0.028 |
+| Type-cond deg JS | **0.033** | 0.038 | 0.040 |
+| Diversity | 0.977 | 0.983 | **0.985** |
+| Unique archetypes | 113 | 120 | **125** |
+
+Key findings (llada confidence):
+- Similar performance to cap, with slightly better MMD at tsw=0.5
+- tsw=0.3 has best type-conditioned degree JS (0.033, matching baseline)
+- tsw=0.7 has most archetypes (125)
+- Edge JS range 0.201-0.207 (comparable to cap)
+
+### Cross-cutting findings: llada vs random with remasking
+
+Remasking **amplifies** the existing tradeoff between unmasking modes:
+
+| Category | llada + remasking | random + remasking |
+|---|---|---|
+| Validity | **99.8-99.9%** | 97.9-98.3% |
+| Graph structure (MMD) | **0.035-0.041** | 0.400-0.408 (10x worse) |
+| Type-cond degree JS | **0.031-0.040** | 0.236-0.246 (6x worse) |
+| Spatial transitivity | **98.1-98.5%** | 96.9-97.7% |
+| Node JS | 0.043-0.050 | **0.004-0.005** (10x better) |
+| Edge JS | 0.197-0.214 | **0.070-0.082** (3x better) |
+| Mode coverage (wt) | 67-73% | **89-91%** |
+| Unique archetypes | 99-125 | **239-257** (2x more) |
+
+**No single best method.** There is a Pareto front: llada dominates on structural
+quality, random dominates on distribution match and coverage. Cap and confidence
+remasking perform similarly within each unmasking mode.
+
+### What remains
+1. **Final method selection** — choose from Pareto front based on downstream
+   task priorities (structural correctness vs distributional fidelity)
+2. Commit all results and updated docs
