@@ -181,8 +181,8 @@ def forward_mask_learned(
     gumbel_weights = stgs_sample(alpha, gumbel_temperature)  # (B, SEQ_LEN, 2)
 
     # 3. PAD override: force keep=1, mask=0 for PAD positions
-    gumbel_weights[~pad_mask, 0] = 1.0
-    gumbel_weights[~pad_mask, 1] = 0.0
+    pad_positions = ~pad_mask  # (B, SEQ_LEN)
+    gumbel_weights[pad_positions] = torch.tensor([1.0, 0.0], device=device)
 
     # 4. Extract keep/mask weights for soft embedding interpolation
     w_keep = gumbel_weights[:, :, 0].unsqueeze(-1)  # (B, SEQ_LEN, 1)
