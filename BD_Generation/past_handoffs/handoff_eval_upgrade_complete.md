@@ -57,7 +57,7 @@ All 5 batches from the evaluation upgrade plan are **complete** (494/494 tests p
 - **No uncommitted breaking changes** — all extensions are additive
 
 ### Uncommitted files (git status)
-**Modified:** `bd_gen/diffusion/__init__.py`, `sampling.py`, `bd_gen/eval/__init__.py`, `metrics.py`, `configs/eval/default.yaml`, `docs/evaluation.md`, `implementation_state_T1.md`, `scripts/evaluate.py`, `tests/test_metrics.py`, `tests/test_sampling.py`, `planning_T1.md`, `notebooks/04_sample_analysis.ipynb`
+**Modified:** `bd_gen/diffusion/__init__.py`, `sampling.py`, `bd_gen/eval/__init__.py`, `metrics.py`, `configs/eval/default.yaml`, `docs/evaluation.md`, `implementation_state_T1.md`, `scripts/evaluate.py`, `tests/test_metrics.py`, `tests/test_sampling.py`, `planning_T1_with_fixed_forward_process.md`, `notebooks/04_sample_analysis.ipynb`
 
 **New:** `bd_gen/diffusion/remasking.py`, `bd_gen/eval/denoising_eval.py`, `docs/denoising_eval.md`, `tests/test_denoising_eval.py`, `tests/test_remasking.py`, `eval_results/` (comparison data)
 

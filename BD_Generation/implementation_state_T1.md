@@ -6,9 +6,10 @@
 
 
 ## Overall Status
-- Current phase: All phases complete (v1 pipeline) + post-v1 enhancements
-- Last completed: Phase 5 + Eval Upgrade + Systematic Comparison
+- Current phase: All phases complete (v1 pipeline) + post-v1 enhancements + v2 learned forward process (MELD)
+- Last completed: v2 Phase 7 (Evaluation Integration)
 - Post-v1: Confidence-based unmasking mode added to sampling (BichraiX); SUBS zero masking probabilities added to denoiser; float64 numerical stability fix (arXiv:2409.02908); ReMDM remasking (cap strategy); Evaluation upgrade (JS/TV/W1, multi-seed, denoising eval, stratified drill-down); Systematic comparison infrastructure (V2 JSON, compare.py)
+- v2 (MELD): Learned per-position forward process — rate network, STGS, per-position ELBO loss, sampling v2, train_v2.py, evaluate.py integration. All 588 tests pass. Ready for training.
 - Spec corrections: vocab.py NODE_TYPES/EDGE_TYPES name-to-index mappings corrected (Phase 1 Step 0); loss_mask formula corrected (Phase 3)
 
 ## Phase 0 — Scaffold
@@ -33,7 +34,7 @@ Branch: `setup/repo-scaffold` → merged to `main`, tagged `v0.1.0`
 - `scripts/.gitkeep`, `notebooks/.gitkeep` — placeholder dirs
 
 ### Deviations from spec
-- None. All implementations match planning_T1.md exactly.
+- None. All implementations match planning_T1_with_fixed_forward_process.md exactly.
 
 ### Issues resolved
 - hydra-core 1.3.2 installs fine on Python 3.14.2 (no compatibility issue)
@@ -73,7 +74,7 @@ Branch: `data/graph2plan-loader` → merged to `main`
 - num_rooms_distribution: normalised histogram from training split, index k = P(k+1 rooms)
 
 ### Deviations from spec
-- None. All implementations match planning_T1.md specs.
+- None. All implementations match planning_T1_with_fixed_forward_process.md specs.
 
 ## Phase 2 — Model Architecture
 Status: COMPLETE
@@ -107,7 +108,7 @@ Branch: `model/transformer-denoiser` → merged to `main`, tagged `v0.3.0`
 - Outer SiLU applied in BDDenoiser.forward() before adaLN, following DiT/DiDAPS convention
 
 ### Deviations from spec
-- None. All implementations match planning_T1.md specs.
+- None. All implementations match planning_T1_with_fixed_forward_process.md specs.
 
 ### Issues resolved
 - `test_different_pad_masks_produce_different_outputs` failed initially because zero-init gates cause blocks to contribute nothing → fixed by randomizing all weights to simulate trained model
@@ -387,7 +388,7 @@ steps with richer context.
 
 ### Deviations from spec
 - Changed remasking_fn hook signature in sampling.py from 2-arg to 4-arg.
-  The original spec (planning_T1.md Section 5.3 and Appendix A) defined
+  The original spec (planning_T1_with_fixed_forward_process.md Section 5.3 and Appendix A) defined
   `remasking_fn(x_t, t)` but this is insufficient — sigma_t computation
   requires both t_now and t_next, and PAD protection requires pad_mask.
   Spec updated accordingly.
@@ -571,7 +572,7 @@ work uses log-linear.
 ---
 
 ## Post-v1 — Remasking Design Comparison (Log-Linear Schedule)
-Status: COMPLETE (20 runs total; final method selection pending)
+Status: COMPLETE (22 runs; final method selection pending)
 
 ### Experiment design
 Layered experiment plan from `remasking_design.md` Section 10. All runs use
@@ -580,10 +581,11 @@ log-linear schedule, 100 sampling steps, 1000 samples, 5 seeds.
 - **Layer 1**: 4 baselines (random/llada x argmax/top-p, no remasking)
 - **Layer 2**: 5 cap eta sweep (0.2, 0.4, 0.6, 0.8, 1.0) — run with both random+top-p and llada+top-p
 - **Layer 3**: 3 confidence + t_switch sweep (0.3, 0.5, 0.7) — run with both random+top-p and llada+top-p
+- **Layer 3b**: 2 confidence without t_switch (t_switch=1.0) — random+top-p and llada+top-p
 - **Run 10**: skipped (argmax mode-collapses with llada; top-p synergy already demonstrated)
 
-Total: 20 runs (4 baselines + 8 random remasking + 8 llada remasking).
-Full results: `eval_results/loglinear/comparison.md` (auto-generated, 20 methods).
+Total: 22 runs (4 baselines + 9 random remasking + 9 llada remasking).
+Completed: 22/22. Full results: `eval_results/loglinear/comparison.md` (auto-generated, 22 methods).
 
 ### Layer 1 results — llada vs random baselines (log-linear)
 
@@ -691,3 +693,73 @@ remasking perform similarly within each unmasking mode.
 1. **Final method selection** — choose from Pareto front based on downstream
    task priorities (structural correctness vs distributional fidelity)
 2. Commit all results and updated docs
+
+---
+
+## v2 — Learned Forward Process (MELD)
+
+> Spec: `planning_T1_with_learned_forward_process.md`
+> All v1 code paths are 100% backward compatible. v2 is purely additive.
+
+### v2 Phase 1 — Rate Network Module
+Status: COMPLETE
+
+**File:** `bd_gen/diffusion/rate_network.py` (NEW)
+**Tests:** `tests/test_rate_network.py` (12 tests)
+
+Implemented `RateNetwork` class with polynomial parameterization of per-position keeping probabilities `α_l(t)`. Each of the 36 sequence positions (8 nodes + 28 edges) gets its own learned monotonic schedule via softplus-positive polynomial coefficients predicted from structural embeddings. Includes `forward()`, `alpha_prime()`, and `forward_with_derivative()` (efficient single-pass). PAD positions forced to α=1.0 / α'=0.0. ~5K params (0.4% of denoiser).
+
+### v2 Phase 2 — STGS and Forward Process v2
+Status: COMPLETE
+
+**File:** `bd_gen/diffusion/forward_process.py` (MODIFIED — new functions added)
+**Tests:** `tests/test_forward_process_v2.py` (13 tests)
+
+Added `stgs_sample()` (Straight-Through Gumbel-Softmax for discrete masking with gradient flow), `forward_mask_learned()` (training path: STGS + soft embeddings), and `forward_mask_eval_learned()` (eval path: discrete masking with per-position α). PAD invariant enforced in both paths. `STGSOutput` TypedDict exported.
+
+### v2 Phase 3 — ELBO Loss v2
+Status: COMPLETE
+
+**File:** `bd_gen/diffusion/loss.py` (MODIFIED — new class added)
+**Tests:** `tests/test_loss_v2.py` (9 tests)
+
+Added `ELBOLossV2` class with per-position ELBO weights `w_l(t) = -α̇_l/(1-α_l)`, separate node/edge normalization (prevents 28 edge positions from drowning out 8 node positions), `lambda_edge` weighting, float64 weight computation, safe CE targets, and edge class weights.
+
+### v2 Phase 4 — Denoiser Change
+Status: COMPLETE
+
+**File:** `bd_gen/model/denoiser.py` (MODIFIED — one optional param)
+
+Added `pre_embedded: Tensor | None = None` parameter to `BDDenoiser.forward()`. When provided, skips token embedding and uses the pre-embedded tensor directly (used by v2 STGS training). Default `None` preserves 100% v1 behavior. No new parameters in the model — v1 checkpoints load unchanged.
+
+### v2 Phase 5 — Sampling v2
+Status: COMPLETE
+
+**File:** `bd_gen/diffusion/sampling.py` (MODIFIED)
+**Tests:** `tests/test_sampling_v2.py` (10 tests)
+
+Added `rate_network: nn.Module | None = None` parameter to `sample()`. When provided, computes per-position `p_unmask_l = (α_l(t_next) - α_l(t_now)) / (1 - α_l(t_now))` in float64. Both "random" and "llada" unmasking modes adapted for per-position alpha. LLaDA budget computed as sum of per-position probabilities over masked positions. Remasking incompatibility warning when both `rate_network` and `remasking_fn` provided.
+
+### v2 Phase 6 — Training Script v2
+Status: COMPLETE
+
+**Files:** `scripts/train_v2.py` (NEW), `configs/noise/learned.yaml` (NEW), `configs/training/v2.yaml` (NEW)
+
+Full training loop with joint optimization of denoiser + rate network. Single AdamW optimizer over all parameters. STGS forward masking with Gumbel temperature annealing (linear decay from 1.0 to 0.1). Validation uses discrete masking (no STGS). Checkpoints save both `model_state_dict` and `rate_network_state_dict`. Usage: `python scripts/train_v2.py noise=learned training=v2`.
+
+### v2 Phase 7 — Evaluation Integration
+Status: COMPLETE
+
+**File:** `scripts/evaluate.py` (MODIFIED)
+
+Added `_load_v2_checkpoint()` helper that auto-detects v2 checkpoints (presence of `rate_network_state_dict` key), instantiates RateNetwork with hyperparams from checkpoint config, and loads weights. Model loading block replaced with v2-aware loading. `rate_network` parameter threaded through `_generate_and_evaluate_single_seed()` and both `sample()` call sites (metrics loop + sample saving). Method name prefixed with `v2_` for v2 checkpoints. Remasking disabled with warning for v2 mode. Dummy `LogLinearSchedule` passed to `sample()` (required by signature; v2 path ignores it).
+
+### v2 Key Decisions Summary
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Denoiser change | Single `pre_embedded` param | Minimal v1 impact, default None preserves all v1 behavior |
+| Training script | Separate `train_v2.py` | Fundamentally different loop (STGS, dual model, gumbel temp) |
+| Checkpoint format | `rate_network_state_dict` key | Auto-detect v2 vs v1 checkpoint in evaluate.py |
+| Gumbel temp schedule | Linear decay 1.0 → 0.1 | Simpler, configurable via config |
+| v2 Removal | Delete 4 new files, optionally remove 4 optional params | All changes are additive; v1 unaffected |

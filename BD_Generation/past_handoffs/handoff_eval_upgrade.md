@@ -15,7 +15,7 @@
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| `planning_T1.md` not modified | Skip it | CLAUDE.md says "only update for spec bugs"; no spec bugs here |
+| `planning_T1_with_fixed_forward_process.md` not modified | Skip it | CLAUDE.md says "only update for spec bugs"; no spec bugs here |
 | Distance helpers are `_`-prefixed | Internal helpers | Matches existing convention (`_kl_divergence`, etc.); tests import them like other internals |
 | JS divergence: no epsilon smoothing | Direct `0*log(0/x)=0` convention | `_kl_divergence` uses eps which introduces bias; JS doesn't need it since m_k > 0 whenever p_k > 0 |
 | Multi-seed: 5 seeds as default | `[42, 123, 456, 789, 1337]` | Per changes_for_sound_comparisons.md spec |
@@ -87,7 +87,7 @@ Priority reading order:
 5. **`BD_Generation/tests/test_metrics.py`** — existing tests to extend (~862 lines)
 6. **`BD_Generation/configs/eval/default.yaml`** — config to expand
 7. **`BD_Generation/bd_gen/eval/__init__.py`** — exports to update
-8. **`BD_Generation/CLAUDE.md`** — project rules (don't modify planning_T1.md, etc.)
+8. **`BD_Generation/CLAUDE.md`** — project rules (don't modify planning_T1_with_fixed_forward_process.md, etc.)
 
 ## Context for the next session
 

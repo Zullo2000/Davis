@@ -178,3 +178,138 @@ class ELBOLoss(nn.Module):
         weighted_loss = w * per_sample_loss  # (B,)
 
         return weighted_loss.mean()
+
+
+class ELBOLossV2(nn.Module):
+    """ELBO loss with per-position weights for learned forward process.
+
+    Unlike v1 ELBOLoss which uses a scalar w(t) from a fixed noise schedule,
+    this version receives per-position alpha and alpha_prime values from a
+    learned rate network, computing per-position ELBO weights w_l(t).
+
+    Additional differences from v1:
+    - Separate normalization for node and edge losses (N_active_nodes and
+      N_active_edges independently).
+    - Lambda edge weighting for balancing node vs edge loss.
+    - Does NOT take a noise_schedule — rates come from rate_network outputs.
+
+    Args:
+        edge_class_weights: (EDGE_VOCAB_SIZE,) inverse-frequency weights.
+        node_class_weights: (NODE_VOCAB_SIZE,) or None.
+        vocab_config: VocabConfig for n_max.
+        lambda_edge: Relative weight for edge loss. Default 1.0.
+        eps: Numerical stability epsilon. Default 1e-8.
+        t_min: Minimum t for clamping. Default 1e-5.
+        w_max: Maximum per-position weight clamp. Default 1000.0.
+    """
+
+    def __init__(
+        self,
+        edge_class_weights: Tensor,
+        node_class_weights: Tensor | None = None,
+        vocab_config: VocabConfig = RPLAN_VOCAB_CONFIG,
+        lambda_edge: float = 1.0,
+        eps: float = 1e-8,
+        t_min: float = 1e-5,
+        w_max: float = 1000.0,
+    ) -> None:
+        super().__init__()
+        self.vocab_config = vocab_config
+        self.lambda_edge = lambda_edge
+        self.eps = eps
+        self.t_min = t_min
+        self.w_max = w_max
+
+        self.register_buffer("edge_class_weights", edge_class_weights.clone())
+        if node_class_weights is not None:
+            self.register_buffer("node_class_weights", node_class_weights.clone())
+        else:
+            self.node_class_weights = None
+
+    def forward(
+        self,
+        node_logits: Tensor,
+        edge_logits: Tensor,
+        x0: Tensor,
+        pad_mask: Tensor,
+        mask_indicators: Tensor,
+        alpha_per_pos: Tensor,
+        alpha_prime_per_pos: Tensor,
+    ) -> Tensor:
+        """Compute per-position ELBO loss.
+
+        Args:
+            node_logits: (B, n_max, NODE_VOCAB_SIZE) float32.
+            edge_logits: (B, n_edges, EDGE_VOCAB_SIZE) float32.
+            x0: (B, SEQ_LEN) long — original clean tokens.
+            pad_mask: (B, SEQ_LEN) bool — True = real position.
+            mask_indicators: (B, SEQ_LEN) bool — True = was masked.
+            alpha_per_pos: (B, SEQ_LEN) from rate network.
+            alpha_prime_per_pos: (B, SEQ_LEN) from rate network.
+
+        Returns:
+            Scalar float32 loss, averaged across the batch.
+        """
+        n_max = self.vocab_config.n_max
+
+        # --- Split into node and edge parts ---
+        node_x0 = x0[:, :n_max]
+        edge_x0 = x0[:, n_max:]
+
+        node_pad = pad_mask[:, :n_max]
+        edge_pad = pad_mask[:, n_max:]
+
+        node_mask_ind = mask_indicators[:, :n_max]
+        edge_mask_ind = mask_indicators[:, n_max:]
+
+        # --- Loss mask: masked AND real (not PAD) ---
+        node_loss_mask = node_mask_ind & node_pad
+        edge_loss_mask = edge_mask_ind & edge_pad
+
+        # --- Per-position ELBO weight (float64 for precision) ---
+        alpha_64 = alpha_per_pos.double()
+        alpha_prime_64 = alpha_prime_per_pos.double()
+        denominator = 1.0 - alpha_64 + self.eps
+        w_per_pos = (-alpha_prime_64 / denominator).float()  # (B, SEQ_LEN)
+        w_per_pos = torch.clamp(w_per_pos, max=self.w_max)
+
+        # Split weights
+        w_node = w_per_pos[:, :n_max]   # (B, n_max)
+        w_edge = w_per_pos[:, n_max:]   # (B, n_edges)
+
+        B = node_logits.shape[0]
+
+        # --- Safe CE targets (from v1) ---
+        safe_node_x0 = torch.where(node_loss_mask, node_x0, torch.zeros_like(node_x0))
+        safe_edge_x0 = torch.where(edge_loss_mask, edge_x0, torch.zeros_like(edge_x0))
+
+        # --- Per-position CE (unreduced) ---
+        node_ce = F.cross_entropy(
+            node_logits.reshape(-1, NODE_VOCAB_SIZE),
+            safe_node_x0.reshape(-1),
+            weight=self.node_class_weights,
+            reduction="none",
+        ).reshape(B, -1)  # (B, n_max)
+
+        edge_ce = F.cross_entropy(
+            edge_logits.reshape(-1, EDGE_VOCAB_SIZE),
+            safe_edge_x0.reshape(-1),
+            weight=self.edge_class_weights,
+            reduction="none",
+        ).reshape(B, -1)  # (B, n_edges)
+
+        # --- Apply loss mask AND per-position weight ---
+        node_ce = node_ce * node_loss_mask.float() * w_node
+        edge_ce = edge_ce * edge_loss_mask.float() * w_edge
+
+        # --- Separate normalization ---
+        n_active_nodes = node_loss_mask.sum(dim=1).float().clamp(min=1.0)  # (B,)
+        n_active_edges = edge_loss_mask.sum(dim=1).float().clamp(min=1.0)  # (B,)
+
+        node_loss = node_ce.sum(dim=1) / n_active_nodes   # (B,)
+        edge_loss = edge_ce.sum(dim=1) / n_active_edges   # (B,)
+
+        # --- Combine with lambda_edge ---
+        per_sample_loss = node_loss + self.lambda_edge * edge_loss  # (B,)
+
+        return per_sample_loss.mean()

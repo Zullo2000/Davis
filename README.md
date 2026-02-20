@@ -66,7 +66,7 @@ Davis/
 
 ## Implementation Status
 
-This project is currently in the implementation phase. See `BD_Generation/` for the main codebase and `planning_T1.md` for the detailed technical specification.
+This project is currently in the implementation phase. See `BD_Generation/` for the main codebase and `planning_T1_with_fixed_forward_process.md` for the detailed technical specification.
 
 ## Key References
 

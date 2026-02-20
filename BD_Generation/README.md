@@ -113,7 +113,7 @@ make test
 
 - **Branch naming**: `feature/<short-description>`, `fix/<short-description>`, `refactor/<short-description>`
 - **Commit messages**: Follow [Conventional Commits](https://www.conventionalcommits.org/) (e.g., `feat: add noise schedule`, `fix: correct PAD masking`, `test: add vocab round-trip tests`).
-- See `planning_T1.md` for implementation phases and `research_T1.md` for design rationale.
+- See `planning_T1_with_fixed_forward_process.md` for implementation phases and `research_T1.md` for design rationale.
 
 ## Note on Makefile
 

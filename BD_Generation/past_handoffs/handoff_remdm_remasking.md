@@ -15,7 +15,7 @@
 - **19 remasking tests**: `tests/test_remasking.py` — PAD protection stress test, sigma formulas, mask token correctness, integration with `sample()`, float64 precision.
 - **ReMDM evaluation run**: Same seed=42 config + cap strategy eta=0.1. Results in `eval_results/remdm_cap_eta0.1.json`.
 - **Comparison table**: `eval_results/comparison.md` with full side-by-side metrics and analysis.
-- **Documentation updated**: Both `planning_T1.md` (2 surgical changes) and `implementation_state_T1.md` (new section appended).
+- **Documentation updated**: Both `planning_T1_with_fixed_forward_process.md` (2 surgical changes) and `implementation_state_T1.md` (new section appended).
 - **Eval results infrastructure**: `eval_results/save_utils.py` with `save_eval_result()`, `load_eval_result()`, `build_comparison_table()`.
 
 ## Key decisions made
@@ -39,7 +39,7 @@
 
 ### Uncommitted changes
 All remasking work is **uncommitted** (staged + untracked). Key changes:
-- **Modified**: `bd_gen/diffusion/__init__.py`, `bd_gen/diffusion/sampling.py`, `configs/eval/default.yaml`, `implementation_state_T1.md`, `planning_T1.md`, `scripts/evaluate.py`, `tests/test_sampling.py`
+- **Modified**: `bd_gen/diffusion/__init__.py`, `bd_gen/diffusion/sampling.py`, `configs/eval/default.yaml`, `implementation_state_T1.md`, `planning_T1_with_fixed_forward_process.md`, `scripts/evaluate.py`, `tests/test_sampling.py`
 - **New files**: `bd_gen/diffusion/remasking.py`, `eval_results/` (directory with 5 files), `tests/test_remasking.py`
 - **Also uncommitted (pre-existing)**: `handoff_float64_stability.md`, `handoff_zero_masking.md`, `changes_for_sound_comparisons.md`, `remasking_doubts.md`
 
@@ -70,7 +70,7 @@ Priority reading order:
 3. `BD_Generation/bd_gen/diffusion/remasking.py` — core remasking implementation
 4. `BD_Generation/bd_gen/diffusion/sampling.py` — the sampling loop with remasking hook
 5. `BD_Generation/configs/eval/default.yaml` — remasking config structure
-6. `BD_Generation/planning_T1.md` — static spec (only if architectural questions arise)
+6. `BD_Generation/planning_T1_with_fixed_forward_process.md` — static spec (only if architectural questions arise)
 
 ## Context for the next session
 

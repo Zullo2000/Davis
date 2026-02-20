@@ -11,6 +11,8 @@ an optional remasking function for ReMDM-style inference.
 
 from __future__ import annotations
 
+import logging
+import warnings
 from typing import Callable
 
 import torch
@@ -25,6 +27,8 @@ from bd_gen.data.vocab import (
     VocabConfig,
 )
 from bd_gen.diffusion.noise_schedule import NoiseSchedule
+
+logger = logging.getLogger(__name__)
 
 
 def _gumbel_sample(logits: Tensor, temperature: float, device: torch.device) -> Tensor:
@@ -128,6 +132,7 @@ def sample(
     fixed_tokens: Tensor | None = None,
     fixed_mask: Tensor | None = None,
     remasking_fn: Callable | None = None,
+    rate_network: torch.nn.Module | None = None,
     num_rooms_distribution: Tensor | None = None,
     fixed_num_rooms: int | None = None,
     device: str = "cpu",
@@ -169,6 +174,9 @@ def sample(
             Not called at the final step (i=0) to ensure all tokens
             are decoded. Receives model logits for confidence-based
             remasking strategies.
+        rate_network: Optional rate network (v2). If provided, uses
+            per-position alpha_l(t) instead of scalar alpha(t) from
+            noise_schedule. When None (default), uses v1 behavior.
         num_rooms_distribution: (n_max,) float32 histogram. Index k =
             P(k+1 rooms). If None, uniform over [1, n_max].
         fixed_num_rooms: If given, all samples have this many rooms.
@@ -182,6 +190,14 @@ def sample(
     """
     n_max = vocab_config.n_max
     seq_len = vocab_config.seq_len
+
+    if rate_network is not None and remasking_fn is not None:
+        warnings.warn(
+            "rate_network and remasking_fn both provided. Remasking with "
+            "learned rates is not yet supported; remasking will be skipped.",
+            stacklevel=2,
+        )
+        remasking_fn = None
 
     # --- Step 1: Determine num_rooms per sample ---
     if fixed_num_rooms is not None:
@@ -234,16 +250,29 @@ def sample(
                 (node_logits, edge_logits), x_t, t_now, pad_mask
             )
 
-        # 4c. Compute unmasking probability in float64 to prevent
-        # catastrophic cancellation when alpha values are close
-        # (high num_steps). See Zheng et al. (arXiv:2409.02908).
-        alpha_now_64 = noise_schedule.alpha(t_tensor.double())  # (B,) float64
-        alpha_next_64 = noise_schedule.alpha(
-            torch.full((batch_size,), t_next, dtype=torch.float64, device=device)
-        )  # (B,) float64
-        p_unmask = (alpha_next_64 - alpha_now_64) / (1.0 - alpha_now_64 + 1e-8)
-        p_unmask = torch.clamp(p_unmask, min=0.0, max=1.0).float()
-        p_unmask = p_unmask.unsqueeze(1)  # (B, 1)
+        # 4c. Compute unmasking probability
+        if rate_network is not None:
+            # v2 path: per-position alpha from rate_network
+            alpha_now_64 = rate_network(t_tensor, pad_mask).double()  # (B, SEQ_LEN)
+            t_next_tensor = torch.full(
+                (batch_size,), t_next, dtype=torch.float32, device=device,
+            )
+            alpha_next_64 = rate_network(t_next_tensor, pad_mask).double()  # (B, SEQ_LEN)
+            p_unmask = (alpha_next_64 - alpha_now_64) / (1.0 - alpha_now_64 + 1e-8)
+            p_unmask = torch.clamp(p_unmask, min=0.0, max=1.0).float()
+            # p_unmask is (B, SEQ_LEN) — per-position
+        else:
+            # v1 path: scalar alpha from noise_schedule
+            # Float64 to prevent catastrophic cancellation when alpha
+            # values are close (high num_steps).
+            # See Zheng et al. (arXiv:2409.02908).
+            alpha_now_64 = noise_schedule.alpha(t_tensor.double())  # (B,) float64
+            alpha_next_64 = noise_schedule.alpha(
+                torch.full((batch_size,), t_next, dtype=torch.float64, device=device)
+            )  # (B,) float64
+            p_unmask = (alpha_next_64 - alpha_now_64) / (1.0 - alpha_now_64 + 1e-8)
+            p_unmask = torch.clamp(p_unmask, min=0.0, max=1.0).float()
+            p_unmask = p_unmask.unsqueeze(1)  # (B, 1) for broadcasting
 
         # 4d. Choose predicted tokens (needed before unmasking decision
         #     for confidence mode)
@@ -290,10 +319,15 @@ def sample(
 
             # Budget: fraction of remaining masked tokens
             num_masked = is_mask.sum(dim=1)  # (B,)
-            num_to_unmask = (
-                (p_unmask.squeeze(1) * num_masked.float())
-                .round().long().clamp(min=1)
-            )
+            if rate_network is not None:
+                # Per-position: sum p_unmask over masked positions per sample
+                budget = (p_unmask * is_mask.float()).sum(dim=1)  # (B,)
+                num_to_unmask = budget.round().long().clamp(min=1)
+            else:
+                num_to_unmask = (
+                    (p_unmask.squeeze(1) * num_masked.float())
+                    .round().long().clamp(min=1)
+                )
 
             if i == 0:
                 # Last step: unmask everything remaining

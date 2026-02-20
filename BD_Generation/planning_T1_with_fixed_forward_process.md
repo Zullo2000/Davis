@@ -106,7 +106,7 @@ Davis/                                              # Git root (existing)
     │
     ├── # Project documentation
     ├── research_T1.md                              # Architectural decisions
-    ├── planning_T1.md                              # THIS DOCUMENT (implementation blueprint)
+    ├── planning_T1_with_fixed_forward_process.md    # THIS DOCUMENT (implementation blueprint)
     ├── discussion_research_T1.md                   # Research findings
     ├── discussion_research_T1_old_version.md       # Initial research output
     ├── google_cloud_usage_efficiency.md            # GPU cost strategy

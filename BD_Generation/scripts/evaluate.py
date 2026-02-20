@@ -34,7 +34,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 from bd_gen.data.dataset import BubbleDiagramDataset  # noqa: E402
 from bd_gen.data.tokenizer import detokenize  # noqa: E402
 from bd_gen.data.vocab import NODE_PAD_IDX, VocabConfig  # noqa: E402
-from bd_gen.diffusion.noise_schedule import get_noise  # noqa: E402
+from bd_gen.diffusion.noise_schedule import LogLinearSchedule, get_noise  # noqa: E402
+from bd_gen.diffusion.rate_network import RateNetwork  # noqa: E402
 from bd_gen.diffusion.remasking import create_remasking_schedule  # noqa: E402
 from bd_gen.diffusion.sampling import sample  # noqa: E402
 from bd_gen.eval.metrics import (  # noqa: E402
@@ -89,6 +90,63 @@ def _reconstruct_pad_masks(
     return pad_masks
 
 
+def _load_v2_checkpoint(
+    ckpt_path: Path,
+    model: torch.nn.Module,
+    vocab_config: VocabConfig,
+    cfg: DictConfig,
+    device: str,
+) -> RateNetwork | None:
+    """Load a checkpoint, detecting v2 (learned forward process) automatically.
+
+    v2 checkpoints contain a ``rate_network_state_dict`` key. When detected,
+    a RateNetwork is instantiated with hyperparameters from the checkpoint's
+    saved config (falling back to defaults from ``configs/noise/learned.yaml``),
+    its weights are loaded, and both the denoiser and rate network are placed
+    on *device*.
+
+    For v1 checkpoints (no ``rate_network_state_dict``), the denoiser is loaded
+    via the standard ``load_checkpoint()`` and ``None`` is returned.
+
+    Args:
+        ckpt_path: Path to the ``.pt`` checkpoint file.
+        model: BDDenoiser instance (already on *device*).
+        vocab_config: VocabConfig for the rate network.
+        cfg: Full Hydra config (used for rate network hyperparams fallback).
+        device: Target device string.
+
+    Returns:
+        A loaded ``RateNetwork`` on *device* if v2 checkpoint, else ``None``.
+    """
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
+
+    if "rate_network_state_dict" in checkpoint:
+        # --- v2 checkpoint ---
+        model.load_state_dict(checkpoint["model_state_dict"])
+        logger.info("v2 denoiser loaded from %s", ckpt_path)
+
+        # Rate network hyperparams: prefer checkpoint config, fall back to cfg
+        ckpt_cfg = checkpoint.get("config", {})
+        noise_cfg = ckpt_cfg.get("noise", {})
+        rate_network = RateNetwork(
+            vocab_config=vocab_config,
+            d_emb=noise_cfg.get("d_emb", cfg.noise.get("d_emb", 32)),
+            K=noise_cfg.get("K", cfg.noise.get("K", 4)),
+            gamma_min=noise_cfg.get("gamma_min", cfg.noise.get("gamma_min", -13.0)),
+            gamma_max=noise_cfg.get("gamma_max", cfg.noise.get("gamma_max", 5.0)),
+            hidden_dim=noise_cfg.get("hidden_dim", cfg.noise.get("hidden_dim", 64)),
+        ).to(device)
+        rate_network.load_state_dict(checkpoint["rate_network_state_dict"])
+        rate_network.eval()
+        n_params = sum(p.numel() for p in rate_network.parameters())
+        logger.info("v2 rate network loaded (%d params)", n_params)
+        return rate_network
+    else:
+        # --- v1 checkpoint ---
+        load_checkpoint(ckpt_path, model, optimizer=None, device=device)
+        return None
+
+
 def _generate_and_evaluate_single_seed(
     cfg: DictConfig,
     model: torch.nn.Module,
@@ -97,8 +155,9 @@ def _generate_and_evaluate_single_seed(
     train_dicts: list[dict],
     num_rooms_dist,
     remasking_fn,
-    device: str,
-    seed: int,
+    rate_network: torch.nn.Module | None = None,
+    device: str = "cpu",
+    seed: int = 42,
 ) -> dict:
     """Generate samples with a given seed and compute all metrics.
 
@@ -127,6 +186,7 @@ def _generate_and_evaluate_single_seed(
                 unmasking_mode=unmasking_mode,
                 t_switch=cfg.eval.remasking.get("t_switch", 1.0),
                 remasking_fn=remasking_fn,
+                rate_network=rate_network,
                 num_rooms_distribution=num_rooms_dist,
                 device=device,
             )
@@ -349,18 +409,32 @@ def evaluate(cfg: DictConfig) -> None:
         frequency_embedding_size=cfg.model.frequency_embedding_size,
     ).to(device)
 
-    load_checkpoint(ckpt_path, model, optimizer=None, device=device)
+    rate_network = _load_v2_checkpoint(ckpt_path, model, vocab_config, cfg, device)
+    is_v2 = rate_network is not None
     model.eval()
-    logger.info("Model loaded from %s", ckpt_path)
+    logger.info("Model loaded from %s (v2=%s)", ckpt_path, is_v2)
 
     # --- Noise schedule ---
-    noise_schedule = get_noise(cfg.noise).to(device)
+    # v2 uses rate_network for per-position alpha; pass a dummy schedule
+    # to sample() which still requires the noise_schedule argument.
+    if is_v2:
+        noise_schedule = LogLinearSchedule().to(device)
+        logger.info(
+            "v2 mode: dummy LogLinearSchedule (rate_network provides alpha)"
+        )
+    else:
+        noise_schedule = get_noise(cfg.noise).to(device)
 
     # --- Remasking schedule (ReMDM) ---
     remasking_fn = create_remasking_schedule(
         cfg.eval.remasking, noise_schedule, vocab_config,
     )
-    if remasking_fn is not None:
+    if remasking_fn is not None and is_v2:
+        logger.warning(
+            "Remasking not supported with v2 learned rates; disabling remasking."
+        )
+        remasking_fn = None
+    elif remasking_fn is not None:
         logger.info(
             "Remasking enabled: strategy=%s, eta=%.3f, t_switch=%.2f",
             cfg.eval.remasking.strategy,
@@ -440,6 +514,7 @@ def evaluate(cfg: DictConfig) -> None:
             train_dicts=train_dicts,
             num_rooms_dist=num_rooms_dist,
             remasking_fn=remasking_fn,
+            rate_network=rate_network,
             device=device,
             seed=seed,
         )
@@ -527,6 +602,8 @@ def evaluate(cfg: DictConfig) -> None:
     else:
         remask_tag = "no_remask"
     method_name = f"{unmask_tag}_{sampling_tag}_{remask_tag}"
+    if is_v2:
+        method_name = f"v2_{method_name}"
 
     # Save to schedule-specific subdirectory (e.g., eval_results/linear/)
     schedule_tag = cfg.noise.type  # "linear", "loglinear", or "cosine"
@@ -588,6 +665,7 @@ def evaluate(cfg: DictConfig) -> None:
                     unmasking_mode=cfg.eval.get("unmasking_mode", "random"),
                     t_switch=cfg.eval.remasking.get("t_switch", 1.0),
                     remasking_fn=remasking_fn,
+                    rate_network=rate_network,
                     num_rooms_distribution=num_rooms_dist,
                     device=device,
                 )

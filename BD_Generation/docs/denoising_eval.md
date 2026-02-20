@@ -28,11 +28,11 @@ For each timestep `t` in `t_grid`:
 
 **Scoring mask:** `mask_indicators & pad_mask` (same logic as `ELBOLoss`).
 
-**Returns** dict with keys:
-- `denoise/acc_node@t={t}` -- node prediction accuracy at noise level t
-- `denoise/acc_edge@t={t}` -- edge prediction accuracy at noise level t
-- `denoise/ce_node@t={t}` -- node cross-entropy at noise level t
-- `denoise/ce_edge@t={t}` -- edge cross-entropy at noise level t
+**Returns** dict with keys (computed separately for nodes — first `n_max` positions — and edges — remaining positions):
+- `denoise/acc_node@t={t}`, `denoise/acc_edge@t={t}` -- Accuracy: fraction of scored positions where `argmax(logits) == ground_truth_token`.
+- `denoise/ce_node@t={t}`, `denoise/ce_edge@t={t}` -- Mean cross-entropy: `F.cross_entropy(logits, targets, reduction="sum")` divided by total scored positions.
+
+At low t (e.g. t=0.1, ~10% masked) accuracy should be high because most context is visible. At high t (e.g. t=0.9, ~90% masked) accuracy drops because the model has almost no context. These per-timestep curves characterize how well the denoiser has learned the data distribution at different noise levels, independent of any sampling strategy.
 
 ### `denoising_val_elbo(model, dataloader, noise_schedule, elbo_loss, vocab_config, device, max_batches=None)`
 

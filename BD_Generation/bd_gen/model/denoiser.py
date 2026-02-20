@@ -153,6 +153,7 @@ class BDDenoiser(nn.Module):
         pad_mask: Tensor,
         t: Tensor | float | int,
         condition: Tensor | None = None,
+        pre_embedded: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Forward pass: tokens + timestep -> per-position logits.
 
@@ -166,6 +167,10 @@ class BDDenoiser(nn.Module):
                 or 1D size B. Float in [0, 1].
             condition: Unused in v1. Placeholder for v2 cross-attention
                 with house boundary features.
+            pre_embedded: (B, seq_len, d_model) float tensor. If provided,
+                skip token embedding and use these directly. Used by v2
+                STGS training where soft embeddings replace discrete tokens.
+                When None (default), embeds tokens as in v1.
 
         Returns:
             Tuple of:
@@ -176,16 +181,21 @@ class BDDenoiser(nn.Module):
         n_max = self.vocab_config.n_max
         device = tokens.device
 
-        # 1. Split tokens into node and edge parts
-        node_tokens = tokens[:, :n_max]  # (B, n_max)
-        edge_tokens = tokens[:, n_max:]  # (B, n_edges)
+        if pre_embedded is not None:
+            # v2 path: use pre-computed soft embeddings (STGS)
+            x = pre_embedded
+        else:
+            # v1 path — UNCHANGED
+            # 1. Split tokens into node and edge parts
+            node_tokens = tokens[:, :n_max]  # (B, n_max)
+            edge_tokens = tokens[:, n_max:]  # (B, n_edges)
 
-        # 2. Embed separately (different vocabularies)
-        node_emb = self.node_embedding(node_tokens)  # (B, n_max, d_model)
-        edge_emb = self.edge_embedding(edge_tokens)  # (B, n_edges, d_model)
+            # 2. Embed separately (different vocabularies)
+            node_emb = self.node_embedding(node_tokens)  # (B, n_max, d_model)
+            edge_emb = self.edge_embedding(edge_tokens)  # (B, n_edges, d_model)
 
-        # 3. Concatenate into full sequence
-        x = torch.cat([node_emb, edge_emb], dim=1)  # (B, seq_len, d_model)
+            # 3. Concatenate into full sequence
+            x = torch.cat([node_emb, edge_emb], dim=1)  # (B, seq_len, d_model)
 
         # 4. Add positional encoding (broadcasts from (seq_len, d_model))
         x = x + self.positional_encoding()

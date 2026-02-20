@@ -1,0 +1,6 @@
+type: learned
+d_emb: 32
+K: 4
+gamma_min: -13.0
+gamma_max: 5.0
+hidden_dim: 64

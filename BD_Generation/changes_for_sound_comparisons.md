@@ -4,7 +4,7 @@
 **Goal:** Make evaluation metrics more *stable* and *consistently comparable* across future model/sampler variants (vanilla MDLM, confidence-unmasking, ReMDM remasking, later extensions).
 
 This plan references the current evaluation module and metric set (`bd_gen/eval/metrics.py`, `scripts/evaluate.py`, `configs/eval/default.yaml`) as described in `docs/evaluation.md`.  
-It also follows the project structure in `planning_T1.md` (Phase 5 evaluation).  
+It also follows the project structure in `planning_T1_with_fixed_forward_process.md` (Phase 5 evaluation).  
 
 ---
 

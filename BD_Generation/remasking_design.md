@@ -465,15 +465,16 @@ no eta).
 | 11  | confidence  | 0.3      | top-p=0.9  | Conservative: remask only last 30% |
 | 12  | confidence  | 0.5      | top-p=0.9  | Balanced |
 | 13  | confidence  | 0.7      | top-p=0.9  | Aggressive: remask from early on |
+| 13b | confidence  | 1.0      | top-p=0.9  | No switch: remask at all steps (both modes) |
 
-**Decision after L3:** Best t_switch for confidence.
+**Decision after L3:** Best t_switch for confidence (including no-switch baseline).
 
 ### Layer 4: Head-to-Head — 0 additional runs
 
 Compare best cap result (from L2) vs best confidence result (from L3).
 Data already collected; just compare metrics.
 
-### Total: ~13 runs
+### Total: ~14 runs
 
 (Minus any baselines already evaluated. Runs 1 and 3 may already exist.)
 
@@ -497,17 +498,20 @@ Data already collected; just compare metrics.
 
 ## 11. Experiment Results & Analysis
 
-> **Date:** 2026-02-19
+> **Date:** 2026-02-20 (updated with tsw=1.0 runs)
 > **Schedule:** Log-linear (with importance sampling)
-> **Total runs:** 20 (4 baselines + 8 random remasking + 8 llada remasking)
-> **Full data:** `eval_results/loglinear/comparison.md` (auto-generated, all 20 methods)
+> **Total runs:** 22 (4 baselines + 9 random remasking + 9 llada remasking)
+> **Full data:** `eval_results/loglinear/comparison.md` (auto-generated, all 22 methods)
 
 ### 11.1 What we ran
 
 The original plan (Section 10) called for running Layers 2-3 with only the
 "winning" unmasking mode from Layer 1. Layer 1 did not produce a clear winner
 — random and llada each dominate different metric families — so we ran Layers
-2-3 with **both** unmasking modes (20 runs total instead of ~13).
+2-3 with **both** unmasking modes (20 runs total instead of ~13). A 21st and 22nd run
+(`random_topp0.9_remdm_confidence_tsw1.0` and `llada_topp0.9_remdm_confidence_tsw1.0`)
+were added to complete the confidence sweep with no-switch baselines (t_switch=1.0,
+remasking active at all steps) for both unmasking modes.
 
 Run 10 (argmax control) was skipped: llada+argmax produces only 5 unique
 archetypes (complete mode collapse from deterministic decoding), making it
@@ -565,11 +569,19 @@ produce nearly identical metrics. The remasking budget hits a ceiling where
 additional remasking cycles stop changing outcomes (re-masked positions get
 similar predictions from similar context).
 
-**Confidence t_switch sweep** (both modes): t_switch values 0.3, 0.5, 0.7
-produce similar results. The small differences:
+**Confidence t_switch sweep** (both modes): t_switch values 0.3, 0.5, 0.7, and 1.0
+produce similar results. The tsw=1.0 case is particularly informative: it means
+remasking is active at **all** timesteps (no switch-off), yet it performs
+equivalently to the partial-remasking variants. This confirms that the
+confidence threshold is self-regulating — at early timesteps (high noise)
+few positions exceed the threshold, so remasking naturally fades without
+needing an explicit t_switch cutoff. The small differences across the sweep:
 - tsw=0.3 (conservative, remask only last 30%): slightly better conditional metrics
 - tsw=0.5: slightly better MMD (0.035 best of all methods for llada)
 - tsw=0.7 (aggressive): slightly more archetypes but worse Edge JS
+- tsw=1.0 (always remask): near-identical to tsw=0.5 — llada: 99.7% validity,
+  0.204 Edge JS, 0.035 MMD, 73.3% mode coverage, 121 archetypes;
+  random: 98.2% validity, 0.081 Edge JS, 0.400 MMD, 90.6% coverage, 251 archetypes
 
 ### 11.5 Pareto front — candidate methods for final selection
 
@@ -581,9 +593,16 @@ downstream priorities. The Pareto-optimal candidates are:
 | llada_topp (no remask) | **100%** | 0.106 | 0.050 | 69.6% | 29 | Safest structure, low diversity |
 | llada + cap eta=0.4 | 99.8% | 0.197 | **0.037** | 71.4% | 112 | Best structure + improved diversity |
 | llada + conf tsw=0.5 | 99.8% | 0.207 | **0.035** | 72.7% | 120 | Best MMD overall |
+| llada + conf tsw=1.0 | 99.7% | 0.204 | **0.035** | 73.3% | 121 | ≈ tsw=0.5, confirms always-remask viable |
 | random_topp (no remask) | 99.7% | **0.035** | 0.302 | 88.5% | 103 | Best distribution match |
 | random + cap eta=0.2 | 98.3% | 0.070 | 0.400 | 89.6% | 239 | Best coverage + good distribution |
 | random + cap eta=0.4 | 98.0% | 0.073 | 0.404 | **90.7%** | **242** | Maximum diversity |
+| random + conf tsw=1.0 | 98.2% | 0.081 | 0.400 | 90.6% | **251** | Most archetypes, higher Edge JS |
+
+The tsw=1.0 entries are near-duplicates of existing Pareto members, confirming
+that the confidence strategy's self-regulating behavior makes t_switch a
+non-critical hyperparameter. In practice, one can simply set tsw=1.0 (always
+remask) without tuning, and get equivalent performance.
 
 ### 11.6 Initial intuitions for method selection
 
@@ -615,3 +634,9 @@ These are preliminary observations to guide tomorrow's decision:
    (low diversity) while preserving its main strength (structural quality).
    For random, remasking provides marginal coverage gains at meaningful
    distribution cost.
+
+6. **t_switch is a non-critical hyperparameter for confidence remasking.**
+   The tsw=1.0 runs (remasking active at every timestep) perform equivalently
+   to tsw=0.3-0.7, confirming the confidence threshold is self-regulating.
+   This simplifies deployment: use confidence remasking with tsw=1.0 and
+   avoid tuning this parameter entirely.
