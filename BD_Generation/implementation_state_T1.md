@@ -6,10 +6,10 @@
 
 
 ## Overall Status
-- Current phase: All phases complete (v1 pipeline) + post-v1 enhancements + v2 learned forward process (MELD)
-- Last completed: v2 Phase 7 (Evaluation Integration)
+- Current phase: All phases complete (v1 pipeline) + post-v1 enhancements + v2 learned forward process (MELD) trained and evaluated
+- Last completed: v2 Phase 8 (Training & Evaluation)
 - Post-v1: Confidence-based unmasking mode added to sampling (BichraiX); SUBS zero masking probabilities added to denoiser; float64 numerical stability fix (arXiv:2409.02908); ReMDM remasking (cap strategy); Evaluation upgrade (JS/TV/W1, multi-seed, denoising eval, stratified drill-down); Systematic comparison infrastructure (V2 JSON, compare.py)
-- v2 (MELD): Learned per-position forward process — rate network, STGS, per-position ELBO loss, sampling v2, train_v2.py, evaluate.py integration. All 588 tests pass. Ready for training.
+- v2 (MELD): Learned per-position forward process — rate network, STGS, per-position ELBO loss, sampling v2, train_v2.py, evaluate.py integration. Trained 500 epochs on jabiru. Evaluated with llada+top-p 0.9, 5 seeds. Results: dramatically better distribution fidelity (Edge JS 3x better), better denoising accuracy (+11-18%), but lower diversity (0.67 vs 0.95).
 - Spec corrections: vocab.py NODE_TYPES/EDGE_TYPES name-to-index mappings corrected (Phase 1 Step 0); loss_mask formula corrected (Phase 3)
 
 ## Phase 0 — Scaffold
@@ -763,3 +763,45 @@ Added `_load_v2_checkpoint()` helper that auto-detects v2 checkpoints (presence 
 | Checkpoint format | `rate_network_state_dict` key | Auto-detect v2 vs v1 checkpoint in evaluate.py |
 | Gumbel temp schedule | Linear decay 1.0 → 0.1 | Simpler, configurable via config |
 | v2 Removal | Delete 4 new files, optionally remove 4 optional params | All changes are additive; v1 unaffected |
+
+### v2 Phase 8 — Training & Evaluation
+Status: COMPLETE
+
+**Server:** Polytechnique `jabiru` (GPU)
+**Checkpoint:** `outputs/v2_2026-02-20_18-36-23/checkpoints/checkpoint_final.pt`
+**Config:** 500 epochs, lr=3e-4, AdamW, grad_clip=1.0, uniform t, Gumbel temp 1.0→0.1 linear decay, lambda_edge=1.0
+
+**Evaluation:** llada + top-p 0.9, 100 steps, 1000 samples, 5 seeds [42, 123, 456, 789, 1337], no remasking.
+**Results file:** `eval_results/loglinear/v2_llada_topp0.9_no_remask.json`
+
+### v2 Results vs v1 (primary comparison: llada_topp0.9_no_remask)
+
+| Metric | v1 | v2 | Change |
+|---|:---:|:---:|---|
+| Validity | 100.0% | 100.0% | Same |
+| Spatial transitivity | 99.9% | 100.0% | Same |
+| Edge JS | 0.106 | **0.035** | 3x better |
+| Node JS | 0.023 | **0.013** | 44% better |
+| Edge TV | 0.399 | **0.217** | 46% better |
+| Cond. edge JS (wt) | 0.175 | **0.155** | 11% better |
+| Type-cond degree JS | 0.033 | 0.036 | ~Same |
+| Mode coverage (wt) | 69.6% | **78.3%** | +8.7% |
+| Denoising acc_edge@0.5 | 0.54 | **0.60** | +11% |
+| Denoising acc_node@0.5 | 0.57 | **0.67** | +18% |
+| Diversity | **0.945** | 0.671 | Much worse |
+| Novelty | **0.975** | 0.864 | Worse |
+| Unique archetypes | 28.6 | 26.0 | Slightly worse |
+| MMD-Degree | **0.050** | 0.104 | 2x worse |
+| MMD-Clustering | **0.032** | 0.090 | 3x worse |
+
+### Issues resolved
+- Boolean indexing bug in `forward_mask_learned()`: `gumbel_weights[~pad_mask, 0]` interpreted as two separate index args on 3D tensor. Fixed by boolean-masking to (N_pad, 2) slice, then assigning `[1.0, 0.0]`. (Commit `729ea6c`)
+- Eval results saved to `eval_results/linear/` instead of `loglinear/` due to v2 noise type being "learned" — manually placed in `loglinear/` for comparison.
+
+### Interpretation
+v2 learned rates deliver exactly what MELD promises: reduced state clashing produces a better denoiser (higher accuracy at all timesteps, better distribution match). Edge JS improved 3x to match `random_topp` levels while retaining llada's perfect validity and transitivity. However, more structured masking trajectories reduce sampling stochasticity, causing diversity/novelty regression. The model generates more accurate but less varied outputs.
+
+### Next steps
+1. Add remasking on top of v2 (main diversity driver in v1)
+2. Try `random` unmasking mode with v2
+3. Increase top-p (e.g., 0.95) to inject more sampling stochasticity

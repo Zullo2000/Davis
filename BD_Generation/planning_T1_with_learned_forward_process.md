@@ -1150,3 +1150,73 @@ Phases 2, 3, 4 can run in parallel once Phase 1 completes. Phase 5 can start aft
 | **Same inference cost** | At sampling time, one rate network forward pass computes all 36 `α_l(t)` values — comparable cost to the scalar `α(t)` lookup in v1. No STGS at inference. |
 | **Separate node/edge normalization** | v2's `ELBOLossV2` normalizes node and edge losses independently, preventing the 28 edge positions from drowning out the 8 node positions. |
 | **Post-hoc remasking compatible** | Remasking can be added as inference-only enhancement later (requires `RemaskingSchedule` adaptation to per-position `α_l`), potentially combining learned rates and remasking benefits. |
+
+---
+
+## 16. Initial Results (500 epochs, jabiru GPU)
+
+**Training:** 500 epochs, lr=3e-4, AdamW, Gumbel temp 1.0→0.1 linear, lambda_edge=1.0, uniform t.
+**Evaluation:** llada + top-p 0.9, 100 steps, 1000 samples, 5 seeds, no remasking.
+**Checkpoint:** `outputs/v2_2026-02-20_18-36-23/checkpoints/checkpoint_final.pt`
+
+### 16.1 Primary Comparison: v2 vs v1 (llada_topp0.9_no_remask)
+
+This is the controlled comparison — same inference setup, isolating the effect of learned rates.
+
+| Metric | v1 | v2 | Change |
+|---|:---:|:---:|---|
+| Validity | 100.0% | 100.0% | Same |
+| Spatial transitivity | 99.9% | 100.0% | Same |
+| **Edge JS** | 0.106 | **0.035** | **3x better** |
+| **Node JS** | 0.023 | **0.013** | **44% better** |
+| Edge TV | 0.399 | **0.217** | 46% better |
+| Cond. edge JS (wt) | 0.175 | **0.155** | 11% better |
+| Type-cond degree JS | 0.033 | 0.036 | ~Same |
+| Mode coverage (wt) | 69.6% | **78.3%** | +8.7% |
+| Denoising acc_edge@0.5 | 0.54 | **0.60** | +11% |
+| Denoising acc_node@0.5 | 0.57 | **0.67** | +18% |
+| Diversity | **0.945** | 0.671 | Much worse |
+| Novelty | **0.975** | 0.864 | Worse |
+| Unique archetypes | 28.6 | 26.0 | Slightly worse |
+| MMD-Degree | **0.050** | 0.104 | 2x worse |
+| MMD-Clustering | **0.032** | 0.090 | 3x worse |
+
+### 16.2 Secondary Comparison: v2 vs v1 best (llada_topp0.9_remdm_confidence_tsw0.5)
+
+This is aspirational — comparing v2 without remasking to v1 with remasking (not a controlled comparison; conflates learned rates vs remasking).
+
+| Metric | v1 + remasking | v2 (no remask) | Change |
+|---|:---:|:---:|---|
+| Validity | 99.8% | **100.0%** | Better |
+| Edge JS | 0.207 | **0.035** | **6x better** |
+| Node JS | 0.046 | **0.013** | **3.5x better** |
+| Cond. edge JS (wt) | 0.254 | **0.155** | 39% better |
+| Mode coverage (wt) | 72.7% | **78.3%** | +5.6% |
+| Denoising acc_edge@0.5 | 0.54 | **0.60** | +11% |
+| Diversity | **0.983** | 0.671 | Much worse |
+| Unique archetypes | **120.2** | 26.0 | Much worse |
+| MMD-Degree | **0.035** | 0.104 | 3x worse |
+
+v2 without remasking already beats v1's best remasking configuration on distribution fidelity by a wide margin. The diversity gap is the main deficit.
+
+### 16.3 Interpretation
+
+**What worked (MELD hypothesis confirmed):**
+- Per-position learned rates reduce state clashing, producing a significantly better denoiser. Denoising accuracy improved 11-18% at medium masking rates — the model reconstructs masked positions far more accurately.
+- Distribution fidelity improved dramatically: Edge JS dropped from 0.106 to 0.035, matching `random_topp` levels (best v1 distribution matcher) while retaining llada's perfect validity and spatial transitivity.
+- Mode coverage increased from 69.6% to 78.3%, confirming that reduced state clashing allows the model to capture more of the data distribution.
+
+**What regressed (diversity-accuracy tradeoff):**
+- Diversity dropped from 0.945 to 0.671. The learned masking trajectories are more structured and deterministic than uniform random masking, reducing the stochastic variation between sampling runs that drives diversity.
+- MMD graph structure metrics (degree, clustering) regressed 2-3x, suggesting the generated graphs cluster around a narrower set of structural patterns.
+- Novelty dropped from 0.975 to 0.864 — more generated samples match training data exactly.
+
+**Key insight:** v2 trades diversity for accuracy. The model generates *more correct* but *less varied* outputs. This is a fundamentally different Pareto point from v1.
+
+### 16.4 Next Steps
+
+1. **Add remasking on top of v2** — remasking was the primary diversity driver in v1 (archetypes: 29 → 120 with confidence remasking). Adapting `RemaskingSchedule` to use per-position `α_l(t)` from the rate network could recover diversity while preserving v2's distribution fidelity gains. This requires modifying the remasking sigma computation to use per-position alpha values.
+
+2. **Try `random` unmasking mode with v2** — in v1, random unmasking had the best diversity (1.0) and distribution match. Combined with v2's better denoiser, random unmasking may produce a strong balance of accuracy and variety.
+
+3. **Increase top-p** (e.g., 0.95 or 1.0) — higher nucleus sampling threshold injects more stochasticity at token selection time, which may compensate for the reduced trajectory-level stochasticity from learned rates.
