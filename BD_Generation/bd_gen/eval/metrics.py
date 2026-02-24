@@ -25,6 +25,65 @@ from bd_gen.data.vocab import EDGE_TYPES, NODE_TYPES
 # ---------------------------------------------------------------------------
 
 
+# Forbidden (A_type_idx, B_type_idx) pairs for inside_validity.
+# "A inside B" is architecturally implausible for each pair below.
+# Source: inside_surrounding_rules.md (69 pairs after MasterRoom-inside-
+# LivingRoom exclusion — see docs/vocab.md for rationale).
+_FORBIDDEN_INSIDE: frozenset[tuple[int, int]] = frozenset({
+    (0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (0, 8),
+    (0, 9), (0, 10), (0, 11),
+    (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7), (1, 8), (1, 9),
+    (1, 10), (1, 11),
+    (2, 1), (2, 3), (2, 5), (2, 6), (2, 7), (2, 8), (2, 9), (2, 10),
+    (2, 11),
+    (3, 10),
+    (4, 1), (4, 3), (4, 5), (4, 8), (4, 9), (4, 10), (4, 11),
+    (5, 2), (5, 3), (5, 4), (5, 9), (5, 10), (5, 11),
+    (6, 3), (6, 9), (6, 10),
+    (7, 3), (7, 9), (7, 10),
+    (8, 3), (8, 9), (8, 10),
+    (9, 2), (9, 3), (9, 6), (9, 10), (9, 11),
+    (10, 1), (10, 2), (10, 3), (10, 4), (10, 5), (10, 6), (10, 7),
+    (10, 8), (10, 9), (10, 11),
+    (11, 9),
+})
+
+
+def inside_validity(graph_dicts: list[dict]) -> float:
+    """Fraction of graphs with no forbidden inside/surrounding connections.
+
+    Checks each edge for architecturally implausible containment
+    relationships (e.g. LivingRoom inside Bathroom). See
+    ``inside_surrounding_rules.md`` for the full forbidden-pair list.
+
+    Args:
+        graph_dicts: List of dicts with ``node_types`` and ``edge_triples``.
+
+    Returns:
+        Float in [0, 1]. Higher is better. Returns 1.0 for empty input.
+    """
+    if not graph_dicts:
+        return 1.0
+
+    valid = 0
+    for g in graph_dicts:
+        node_types = g["node_types"]
+        violation = False
+        for u, v, rel in g["edge_triples"]:
+            if rel == 4:  # inside: u is inside v
+                if (node_types[u], node_types[v]) in _FORBIDDEN_INSIDE:
+                    violation = True
+                    break
+            elif rel == 5:  # surrounding: u surrounds v → v inside u
+                if (node_types[v], node_types[u]) in _FORBIDDEN_INSIDE:
+                    violation = True
+                    break
+        if not violation:
+            valid += 1
+
+    return valid / len(graph_dicts)
+
+
 def validity_rate(results: list[dict]) -> float:
     """Fraction of validity results where ``overall`` is True.
 

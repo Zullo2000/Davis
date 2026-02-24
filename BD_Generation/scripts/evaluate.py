@@ -1,29 +1,32 @@
-"""Full evaluation pipeline: generate samples, compute metrics, log results.
+"""Compute metrics from saved sample tokens (CPU only, no model needed).
 
-Uses Hydra's Compose API (same pattern as train.py).
+Loads ``{method}_samples.pt`` files produced by ``generate_samples.py``,
+detokenizes, computes all metrics, and saves/updates ``{method}.json``.
 
 Usage::
 
-    python scripts/evaluate.py eval.checkpoint_path=path/to/ckpt.pt
-    python scripts/evaluate.py eval.checkpoint_path=... eval.num_samples=500
-    python scripts/evaluate.py eval.checkpoint_path=... wandb.mode=disabled
+    # Evaluate one model
+    python scripts/evaluate.py --schedule loglinear --model llada_argmax_no_remask
+
+    # Evaluate all models with saved samples
+    python scripts/evaluate.py --schedule loglinear
+
+    # List models with/without saved samples
+    python scripts/evaluate.py --schedule loglinear --list
+
+    # Also regenerate comparison.md
+    python scripts/evaluate.py --schedule loglinear --update-comparison
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import sys
-from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import torch
-import wandb
-from hydra import compose, initialize_config_dir
-from hydra.core.global_hydra import GlobalHydra
-from omegaconf import DictConfig, OmegaConf
-from tqdm import tqdm
 
 # Ensure BD_Generation is on sys.path when running as a script
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -33,11 +36,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from bd_gen.data.dataset import BubbleDiagramDataset  # noqa: E402
 from bd_gen.data.tokenizer import detokenize  # noqa: E402
-from bd_gen.data.vocab import NODE_PAD_IDX, VocabConfig  # noqa: E402
-from bd_gen.diffusion.noise_schedule import LogLinearSchedule, get_noise  # noqa: E402
-from bd_gen.diffusion.rate_network import RateNetwork  # noqa: E402
-from bd_gen.diffusion.remasking import create_remasking_schedule  # noqa: E402
-from bd_gen.diffusion.sampling import sample  # noqa: E402
+from bd_gen.data.vocab import VocabConfig  # noqa: E402
 from bd_gen.eval.metrics import (  # noqa: E402
     conditional_edge_distances_topN,
     conditional_edge_kl,
@@ -45,6 +44,7 @@ from bd_gen.eval.metrics import (  # noqa: E402
     diversity,
     edge_present_rate_by_num_rooms,
     graph_structure_mmd,
+    inside_validity,
     mode_coverage,
     novelty,
     spatial_transitivity,
@@ -54,11 +54,12 @@ from bd_gen.eval.metrics import (  # noqa: E402
     validity_rate,
 )
 from bd_gen.eval.validity import check_validity_batch  # noqa: E402
-from bd_gen.model.denoiser import BDDenoiser  # noqa: E402
-from bd_gen.utils.checkpoint import load_checkpoint  # noqa: E402
-from bd_gen.utils.logging_utils import init_wandb, log_metrics  # noqa: E402
-from bd_gen.utils.seed import set_seed  # noqa: E402
-from bd_gen.viz.graph_viz import draw_bubble_diagram_grid  # noqa: E402
+from eval_results.save_utils import (  # noqa: E402
+    aggregate_multi_seed,
+    build_comparison_table,
+    make_json_serializable,
+    save_eval_result,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,134 +68,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _load_config(overrides: list[str] | None = None) -> DictConfig:
-    """Load and compose the Hydra config with CLI overrides."""
-    config_dir = str((_PROJECT_ROOT / "configs").resolve())
-    GlobalHydra.instance().clear()
-    with initialize_config_dir(config_dir=config_dir, version_base=None):
-        cfg = compose(config_name="config", overrides=overrides or [])
-    return cfg
+# ---------------------------------------------------------------------------
+# Core metric computation
+# ---------------------------------------------------------------------------
 
 
-def _reconstruct_pad_masks(
+def compute_all_metrics(
     tokens: torch.Tensor,
-    vocab_config: VocabConfig,
-) -> torch.Tensor:
-    """Reconstruct pad masks from generated tokens."""
-    pad_masks = torch.zeros_like(tokens, dtype=torch.bool)
-    for i in range(tokens.size(0)):
-        node_tokens = tokens[i, :vocab_config.n_max]
-        num_rooms = int((node_tokens != NODE_PAD_IDX).sum().item())
-        num_rooms = max(1, min(num_rooms, vocab_config.n_max))
-        pad_masks[i] = vocab_config.compute_pad_mask(num_rooms)
-    return pad_masks
-
-
-def _load_v2_checkpoint(
-    ckpt_path: Path,
-    model: torch.nn.Module,
-    vocab_config: VocabConfig,
-    cfg: DictConfig,
-    device: str,
-) -> RateNetwork | None:
-    """Load a checkpoint, detecting v2 (learned forward process) automatically.
-
-    v2 checkpoints contain a ``rate_network_state_dict`` key. When detected,
-    a RateNetwork is instantiated with hyperparameters from the checkpoint's
-    saved config (falling back to defaults from ``configs/noise/learned.yaml``),
-    its weights are loaded, and both the denoiser and rate network are placed
-    on *device*.
-
-    For v1 checkpoints (no ``rate_network_state_dict``), the denoiser is loaded
-    via the standard ``load_checkpoint()`` and ``None`` is returned.
-
-    Args:
-        ckpt_path: Path to the ``.pt`` checkpoint file.
-        model: BDDenoiser instance (already on *device*).
-        vocab_config: VocabConfig for the rate network.
-        cfg: Full Hydra config (used for rate network hyperparams fallback).
-        device: Target device string.
-
-    Returns:
-        A loaded ``RateNetwork`` on *device* if v2 checkpoint, else ``None``.
-    """
-    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
-
-    if "rate_network_state_dict" in checkpoint:
-        # --- v2 checkpoint ---
-        model.load_state_dict(checkpoint["model_state_dict"])
-        logger.info("v2 denoiser loaded from %s", ckpt_path)
-
-        # Rate network hyperparams: prefer checkpoint config, fall back to cfg
-        ckpt_cfg = checkpoint.get("config", {})
-        noise_cfg = ckpt_cfg.get("noise", {})
-        rate_network = RateNetwork(
-            vocab_config=vocab_config,
-            d_emb=noise_cfg.get("d_emb", cfg.noise.get("d_emb", 32)),
-            K=noise_cfg.get("K", cfg.noise.get("K", 4)),
-            gamma_min=noise_cfg.get("gamma_min", cfg.noise.get("gamma_min", -13.0)),
-            gamma_max=noise_cfg.get("gamma_max", cfg.noise.get("gamma_max", 5.0)),
-            hidden_dim=noise_cfg.get("hidden_dim", cfg.noise.get("hidden_dim", 64)),
-        ).to(device)
-        rate_network.load_state_dict(checkpoint["rate_network_state_dict"])
-        rate_network.eval()
-        n_params = sum(p.numel() for p in rate_network.parameters())
-        logger.info("v2 rate network loaded (%d params)", n_params)
-        return rate_network
-    else:
-        # --- v1 checkpoint ---
-        load_checkpoint(ckpt_path, model, optimizer=None, device=device)
-        return None
-
-
-def _generate_and_evaluate_single_seed(
-    cfg: DictConfig,
-    model: torch.nn.Module,
-    noise_schedule,
+    pad_masks: torch.Tensor,
     vocab_config: VocabConfig,
     train_dicts: list[dict],
-    num_rooms_dist,
-    remasking_fn,
-    rate_network: torch.nn.Module | None = None,
-    device: str = "cpu",
-    seed: int = 42,
+    n_max: int,
+    conditional_topN_pairs: int | None = 20,
 ) -> dict:
-    """Generate samples with a given seed and compute all metrics.
+    """Compute all metrics from tokens + pad_masks.
+
+    This is a pure-CPU function.  It detokenizes, runs validity checks,
+    and computes every metric unconditionally.
 
     Returns a flat dict of metric_name -> float (or nested dicts for
     stratified metrics).
     """
-    set_seed(seed)
-
-    num_samples = cfg.eval.num_samples
-    batch_size = cfg.eval.batch_size
-    unmasking_mode = cfg.eval.get("unmasking_mode", "random")
-
-    # --- Generate samples ---
-    all_tokens = []
-    with torch.no_grad():
-        for start in range(0, num_samples, batch_size):
-            bs = min(batch_size, num_samples - start)
-            batch_tokens = sample(
-                model=model,
-                noise_schedule=noise_schedule,
-                vocab_config=vocab_config,
-                batch_size=bs,
-                num_steps=cfg.eval.sampling_steps,
-                temperature=cfg.eval.temperature,
-                top_p=cfg.eval.get("top_p", None),
-                unmasking_mode=unmasking_mode,
-                t_switch=cfg.eval.remasking.get("t_switch", 1.0),
-                remasking_fn=remasking_fn,
-                rate_network=rate_network,
-                num_rooms_distribution=num_rooms_dist,
-                device=device,
-            )
-            all_tokens.append(batch_tokens.cpu())
-
-    tokens = torch.cat(all_tokens, dim=0)
-    pad_masks = _reconstruct_pad_masks(tokens, vocab_config)
-
     # --- Validity check ---
     validity_results = check_validity_batch(tokens, pad_masks, vocab_config)
     v_rate = validity_rate(validity_results)
@@ -208,58 +102,42 @@ def _generate_and_evaluate_single_seed(
         except ValueError:
             graph_dicts.append({"num_rooms": 0, "node_types": [], "edge_triples": []})
 
-    # --- Compute metrics ---
+    # --- All metrics (unconditional — always compute everything) ---
     metrics: dict = {"eval/validity_rate": v_rate}
-    requested = cfg.eval.metrics
 
-    if "diversity" in requested:
-        metrics["eval/diversity"] = diversity(graph_dicts)
+    metrics["eval/diversity"] = diversity(graph_dicts)
+    metrics["eval/novelty"] = novelty(graph_dicts, train_dicts)
 
-    if "novelty" in requested:
-        metrics["eval/novelty"] = novelty(graph_dicts, train_dicts)
+    dm = distribution_match(graph_dicts, train_dicts)
+    for key, val in dm.items():
+        metrics[f"eval/{key}"] = val
 
-    if "distribution_match" in requested:
-        dm = distribution_match(graph_dicts, train_dicts)
-        for key, val in dm.items():
-            metrics[f"eval/{key}"] = val
+    cekl = conditional_edge_kl(graph_dicts, train_dicts)
+    for key, val in cekl.items():
+        metrics[f"eval/{key}"] = val
 
-    if "conditional_edge_kl" in requested:
-        cekl = conditional_edge_kl(graph_dicts, train_dicts)
-        for key, val in cekl.items():
-            metrics[f"eval/{key}"] = val
-
-    # Top-N conditional distances
-    top_n = cfg.eval.get("conditional_topN_pairs", None)
-    if top_n is not None and "conditional_edge_kl" in requested:
+    if conditional_topN_pairs is not None:
         topn_result = conditional_edge_distances_topN(
-            graph_dicts, train_dicts, top_n=top_n,
+            graph_dicts, train_dicts, top_n=conditional_topN_pairs,
         )
         for key, val in topn_result.items():
             metrics[f"eval/{key}"] = val
 
-    if "graph_structure_mmd" in requested:
-        mmd = graph_structure_mmd(
-            graph_dicts, train_dicts, n_max=cfg.data.n_max,
-        )
-        for key, val in mmd.items():
-            metrics[f"eval/{key}"] = val
+    mmd = graph_structure_mmd(graph_dicts, train_dicts, n_max=n_max)
+    for key, val in mmd.items():
+        metrics[f"eval/{key}"] = val
 
-    if "spatial_transitivity" in requested:
-        st = spatial_transitivity(graph_dicts)
-        for key, val in st.items():
-            metrics[f"eval/{key}"] = val
+    st = spatial_transitivity(graph_dicts)
+    for key, val in st.items():
+        metrics[f"eval/{key}"] = val
 
-    if "type_conditioned_degree_kl" in requested:
-        tcdkl = type_conditioned_degree_kl(
-            graph_dicts, train_dicts, n_max=cfg.data.n_max,
-        )
-        for key, val in tcdkl.items():
-            metrics[f"eval/{key}"] = val
+    tcdkl = type_conditioned_degree_kl(graph_dicts, train_dicts, n_max=n_max)
+    for key, val in tcdkl.items():
+        metrics[f"eval/{key}"] = val
 
-    if "mode_coverage" in requested:
-        mc = mode_coverage(graph_dicts, train_dicts)
-        for key, val in mc.items():
-            metrics[f"eval/{key}"] = val
+    mc = mode_coverage(graph_dicts, train_dicts)
+    for key, val in mc.items():
+        metrics[f"eval/{key}"] = val
 
     # --- Detailed validity breakdown ---
     n_res = len(validity_results)
@@ -273,192 +151,124 @@ def _generate_and_evaluate_single_seed(
         1 for r in validity_results if r["no_mask_tokens"]
     ) / n_res
 
+    metrics["eval/inside_validity"] = inside_validity(graph_dicts)
+
     # --- Stratified metrics ---
-    if cfg.eval.get("stratified", True):
-        vbn = validity_by_num_rooms(validity_results, graph_dicts)
-        metrics["validity_by_num_rooms"] = vbn
-
-        stbn = spatial_transitivity_by_num_rooms(graph_dicts)
-        metrics["transitivity_by_num_rooms"] = stbn
-
-        ebn = edge_present_rate_by_num_rooms(graph_dicts)
-        metrics["edge_present_rate_by_num_rooms"] = ebn
+    metrics["validity_by_num_rooms"] = validity_by_num_rooms(
+        validity_results, graph_dicts,
+    )
+    metrics["transitivity_by_num_rooms"] = spatial_transitivity_by_num_rooms(
+        graph_dicts,
+    )
+    metrics["edge_present_rate_by_num_rooms"] = edge_present_rate_by_num_rooms(
+        graph_dicts,
+    )
 
     return metrics
 
 
-def _aggregate_multi_seed(
-    per_seed_results: dict[int, dict],
+# ---------------------------------------------------------------------------
+# Single-method evaluation
+# ---------------------------------------------------------------------------
+
+
+def evaluate_method(
+    samples_path: Path,
+    eval_dir: Path,
+    train_dicts: list[dict],
+    n_max: int = 8,
+    conditional_topN_pairs: int | None = 20,
 ) -> dict[str, dict[str, float]]:
-    """Aggregate scalar metrics across seeds into mean/std.
+    """Evaluate a single method from saved sample tensors.
 
-    Nested dicts (stratified metrics) are flattened with ``/`` separators
-    and aggregated leaf-by-leaf.
+    Loads the ``_samples.pt``, runs all metrics per seed, aggregates,
+    and writes/updates the corresponding ``.json`` result file.
 
-    Returns:
-        Dict mapping metric_name to {"mean": ..., "std": ...}.
+    Returns the summary dict.
     """
+    data = torch.load(samples_path, weights_only=True)
+    vocab_config = VocabConfig(n_max=data.get("n_max", n_max))
+    seeds = data["seeds"]
+    method = data.get("method", samples_path.stem.replace("_samples", ""))
 
-    def _flatten(d: dict, prefix: str = "") -> dict[str, float]:
-        """Flatten nested dict into dot-separated keys, keeping only floats."""
-        flat: dict[str, float] = {}
-        for k, v in d.items():
-            key = f"{prefix}/{k}" if prefix else k
-            if isinstance(v, (int, float)):
-                flat[key] = float(v)
-            elif isinstance(v, dict):
-                flat.update(_flatten(v, key))
-        return flat
+    # Preserve config and denoising from existing JSON if present
+    json_path = eval_dir / f"{method}.json"
+    config_dict = data.get("config", {})
+    denoising_metrics: dict = {}
+    if json_path.exists():
+        existing = json.loads(json_path.read_text())
+        config_dict = existing.get("config", config_dict)
+        denoising_metrics = existing.get("denoising", {})
 
-    # Flatten each seed's metrics
-    all_flat: dict[int, dict[str, float]] = {}
-    for seed, metrics in per_seed_results.items():
-        all_flat[seed] = _flatten(metrics)
+    # Evaluate each seed
+    per_seed_results: dict[int, dict] = {}
+    for seed in seeds:
+        seed_key = str(seed)
+        seed_data = data["per_seed"][seed_key]
+        tokens = seed_data["tokens"]
+        pad_masks = seed_data["pad_masks"]
 
-    # Collect all keys across seeds
-    all_keys: set[str] = set()
-    for flat in all_flat.values():
-        all_keys.update(flat.keys())
+        logger.info(
+            "  Seed %s: %d samples, seq_len=%d",
+            seed_key, tokens.size(0), tokens.size(1),
+        )
 
-    # Compute mean/std per key
-    summary: dict[str, dict[str, float]] = {}
-    for key in sorted(all_keys):
-        values = [flat[key] for flat in all_flat.values() if key in flat]
-        if values:
-            arr = np.array(values, dtype=np.float64)
-            summary[key] = {
-                "mean": float(arr.mean()),
-                "std": float(arr.std(ddof=0)),
-            }
+        metrics = compute_all_metrics(
+            tokens, pad_masks, vocab_config, train_dicts,
+            n_max, conditional_topN_pairs,
+        )
+        per_seed_results[int(seed)] = metrics
 
+    # Aggregate across seeds
+    summary = aggregate_multi_seed(per_seed_results)
+
+    # Log key metrics
+    vr = summary.get("eval/validity_rate", {})
+    div = summary.get("eval/diversity", {})
+    logger.info(
+        "  validity=%.1f%% +/- %.1f%%, diversity=%.3f +/- %.3f",
+        100 * vr.get("mean", 0), 100 * vr.get("std", 0),
+        div.get("mean", 0), div.get("std", 0),
+    )
+
+    # Save result JSON
+    save_eval_result(
+        path=json_path,
+        method=method,
+        config_dict=config_dict,
+        per_seed_metrics={
+            s: make_json_serializable(m) for s, m in per_seed_results.items()
+        },
+        summary_metrics=summary,
+        denoising_metrics=denoising_metrics if denoising_metrics else None,
+    )
+    logger.info("  Saved: %s", json_path)
     return summary
 
 
-def _prefix_metrics(metrics: dict[str, float]) -> dict[str, float]:
-    """Add scoreboard prefixes to flat metric keys for wandb grouping."""
-    prefix_map = {
-        "eval/validity_rate": "sampler/validity/overall",
-        "eval/connected_rate": "sampler/validity/connected",
-        "eval/valid_types_rate": "sampler/validity/valid_types",
-        "eval/no_mask_rate": "sampler/validity/no_mask_tokens",
-        "eval/diversity": "sampler/coverage/diversity",
-        "eval/novelty": "sampler/coverage/novelty",
-        "eval/mode_coverage": "sampler/coverage/mode_coverage",
-        "eval/mode_coverage_weighted": "sampler/coverage/mode_coverage_weighted",
-        "eval/node_kl": "sampler/distribution/node_kl",
-        "eval/edge_kl": "sampler/distribution/edge_kl",
-        "eval/num_rooms_kl": "sampler/distribution/rooms_kl",
-        "eval/node_js": "sampler/distribution/node_js",
-        "eval/edge_js": "sampler/distribution/edge_js",
-        "eval/node_tv": "sampler/distribution/node_tv",
-        "eval/edge_tv": "sampler/distribution/edge_tv",
-        "eval/rooms_w1": "sampler/distribution/rooms_w1",
-        "eval/mmd_degree": "sampler/structure/mmd_degree",
-        "eval/mmd_clustering": "sampler/structure/mmd_clustering",
-        "eval/mmd_spectral": "sampler/structure/mmd_spectral",
-        "eval/transitivity_score": "sampler/structure/transitivity_score",
-        "eval/h_consistent": "sampler/structure/h_consistent",
-        "eval/v_consistent": "sampler/structure/v_consistent",
-    }
-    prefixed = {}
-    for key, val in metrics.items():
-        if isinstance(val, (int, float)):
-            if key in prefix_map:
-                prefixed[prefix_map[key]] = val
-            # Also keep conditional/degree metrics with sampler/ prefix
-            elif key.startswith("eval/conditional_edge"):
-                prefixed[key.replace("eval/", "sampler/conditional/")] = val
-            elif key.startswith("eval/degree_"):
-                prefixed[key.replace("eval/", "sampler/conditional/")] = val
-    return prefixed
+# ---------------------------------------------------------------------------
+# Training data loading
+# ---------------------------------------------------------------------------
 
 
-def evaluate(cfg: DictConfig) -> None:
-    """Run the full evaluation pipeline."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info("Device: %s", device)
+def load_train_dicts(n_max: int = 8) -> list[dict]:
+    """Load and detokenize the training set for reference distributions."""
+    vocab_config = VocabConfig(n_max=n_max)
+    mat_path = _PROJECT_ROOT / "data" / "data.mat"
+    cache_path = _PROJECT_ROOT / "data_cache" / f"graph2plan_nmax{n_max}.pt"
 
-    # --- Output directory ---
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    output_dir = _PROJECT_ROOT / "outputs" / f"eval_{timestamp}"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "config.yaml").write_text(OmegaConf.to_yaml(cfg, resolve=True))
-
-    # --- wandb ---
-    init_wandb(cfg)
-
-    # --- Check checkpoint path ---
-    ckpt_path = cfg.eval.checkpoint_path
-    if ckpt_path is None:
-        logger.error("eval.checkpoint_path is required. Set via CLI override.")
-        sys.exit(1)
-    ckpt_path = Path(ckpt_path)
-    if not ckpt_path.is_absolute():
-        ckpt_path = _PROJECT_ROOT / ckpt_path
-
-    # --- Build model ---
-    vocab_config = VocabConfig(n_max=cfg.data.n_max)
-    model = BDDenoiser(
-        d_model=cfg.model.d_model,
-        n_layers=cfg.model.n_layers,
-        n_heads=cfg.model.n_heads,
-        vocab_config=vocab_config,
-        cond_dim=cfg.model.cond_dim,
-        mlp_ratio=cfg.model.mlp_ratio,
-        dropout=0.0,
-        frequency_embedding_size=cfg.model.frequency_embedding_size,
-    ).to(device)
-
-    rate_network = _load_v2_checkpoint(ckpt_path, model, vocab_config, cfg, device)
-    is_v2 = rate_network is not None
-    model.eval()
-    logger.info("Model loaded from %s (v2=%s)", ckpt_path, is_v2)
-
-    # --- Noise schedule ---
-    # v2 uses rate_network for per-position alpha; pass a dummy schedule
-    # to sample() which still requires the noise_schedule argument.
-    if is_v2:
-        noise_schedule = LogLinearSchedule().to(device)
-        logger.info(
-            "v2 mode: dummy LogLinearSchedule (rate_network provides alpha)"
-        )
-    else:
-        noise_schedule = get_noise(cfg.noise).to(device)
-
-    # --- Remasking schedule (ReMDM) ---
-    remasking_fn = create_remasking_schedule(
-        cfg.eval.remasking, noise_schedule, vocab_config,
-    )
-    if remasking_fn is not None and is_v2:
-        logger.warning(
-            "Remasking not supported with v2 learned rates; disabling remasking."
-        )
-        remasking_fn = None
-    elif remasking_fn is not None:
-        logger.info(
-            "Remasking enabled: strategy=%s, eta=%.3f, t_switch=%.2f",
-            cfg.eval.remasking.strategy,
-            cfg.eval.remasking.eta,
-            cfg.eval.remasking.get("t_switch", 1.0),
-        )
-
-    # --- Load dataset for reference statistics ---
-    mat_path = _PROJECT_ROOT / cfg.data.mat_path
-    cache_path = _PROJECT_ROOT / cfg.data.cache_path
     train_ds = BubbleDiagramDataset(
         mat_path=mat_path,
         cache_path=cache_path,
         vocab_config=vocab_config,
         split="train",
-        train_frac=cfg.data.splits.train,
-        val_frac=cfg.data.splits.val,
-        test_frac=cfg.data.splits.test,
-        seed=cfg.seed,
+        train_frac=0.8,
+        val_frac=0.1,
+        test_frac=0.1,
+        seed=42,
     )
-    num_rooms_dist = train_ds.num_rooms_distribution
 
-    # Detokenize training set for comparison
-    logger.info("Detokenizing training set for comparison metrics...")
+    logger.info("Detokenizing training set (%d samples)...", len(train_ds))
     train_dicts = []
     for idx in range(len(train_ds)):
         item = train_ds[idx]
@@ -467,265 +277,112 @@ def evaluate(cfg: DictConfig) -> None:
             train_dicts.append(gd)
         except ValueError:
             pass
+    logger.info("Training set: %d valid graphs", len(train_dicts))
+    return train_dicts
 
-    # --- Denoising eval (seed-independent, run once) ---
-    denoising_metrics: dict[str, float] = {}
-    run_denoising = cfg.eval.get("run_denoising_eval", False)
-    if run_denoising:
-        from torch.utils.data import DataLoader
 
-        from bd_gen.eval.denoising_eval import denoising_eval, denoising_val_elbo
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
-        val_ds = BubbleDiagramDataset(
-            mat_path=mat_path,
-            cache_path=cache_path,
-            vocab_config=vocab_config,
-            split="val",
-            train_frac=cfg.data.splits.train,
-            val_frac=cfg.data.splits.val,
-            test_frac=cfg.data.splits.test,
-            seed=cfg.seed,
-        )
-        val_loader = DataLoader(val_ds, batch_size=cfg.eval.batch_size, shuffle=False)
 
-        t_grid = list(cfg.eval.get("denoising_t_grid", [0.1, 0.3, 0.5, 0.7, 0.9]))
-        max_batches = cfg.eval.get("denoising_max_batches", None)
-        logger.info("Running denoising eval (t_grid=%s)...", t_grid)
-
-        denoising_metrics = denoising_eval(
-            model, val_loader, noise_schedule, vocab_config,
-            t_grid=t_grid, device=device, max_batches=max_batches,
-        )
-        for key, val in denoising_metrics.items():
-            logger.info("  %s: %.4f", key, val)
-
-    # --- Multi-seed evaluation ---
-    seeds = list(cfg.eval.get("seeds", [cfg.seed]))
-    logger.info("Running evaluation with %d seed(s): %s", len(seeds), seeds)
-
-    per_seed_results: dict[int, dict] = {}
-    for seed in seeds:
-        logger.info("--- Seed %d ---", seed)
-        seed_metrics = _generate_and_evaluate_single_seed(
-            cfg=cfg,
-            model=model,
-            noise_schedule=noise_schedule,
-            vocab_config=vocab_config,
-            train_dicts=train_dicts,
-            num_rooms_dist=num_rooms_dist,
-            remasking_fn=remasking_fn,
-            rate_network=rate_network,
-            device=device,
-            seed=seed,
-        )
-        per_seed_results[seed] = seed_metrics
-
-        # Log per-seed scalar metrics
-        scalar_keys = {
-            k: v for k, v in seed_metrics.items() if isinstance(v, (int, float))
-        }
-        logger.info(
-            "Seed %d — validity=%.1f%%, diversity=%.3f",
-            seed,
-            100 * scalar_keys.get("eval/validity_rate", 0),
-            scalar_keys.get("eval/diversity", 0),
-        )
-
-    # --- Aggregate across seeds ---
-    summary = _aggregate_multi_seed(per_seed_results)
-
-    # Log summary means
-    logger.info("--- Multi-seed summary (%d seeds) ---", len(seeds))
-    for key in sorted(summary):
-        s = summary[key]
-        logger.info("  %s: %.4f +/- %.4f", key, s["mean"], s["std"])
-
-    # --- Build flat metrics dict for wandb (summary means) ---
-    flat_metrics: dict[str, float] = {}
-    for key, s in summary.items():
-        flat_metrics[key] = s["mean"]
-        flat_metrics[f"{key}_std"] = s["std"]
-
-    # Add denoising metrics (not aggregated, run once)
-    flat_metrics.update(denoising_metrics)
-
-    # Add prefixed aliases for wandb grouping
-    prefixed = _prefix_metrics(flat_metrics)
-    flat_metrics.update(prefixed)
-
-    # --- Log to wandb ---
-    log_metrics(flat_metrics)
-
-    # --- Save results ---
-    results_path = output_dir / "metrics.json"
-    full_output = {
-        "meta": {
-            "checkpoint": str(ckpt_path.name),
-            "num_samples": cfg.eval.num_samples,
-            "sampling_steps": cfg.eval.sampling_steps,
-            "seeds": seeds,
-        },
-        "per_seed": {
-            str(s): _make_json_serializable(m)
-            for s, m in per_seed_results.items()
-        },
-        "summary": summary,
-        "denoising": denoising_metrics,
-    }
-    results_path.write_text(json.dumps(full_output, indent=2))
-    logger.info("Metrics saved: %s", results_path)
-
-    # --- Save structured result for cross-method comparison ---
-    from eval_results.save_utils import save_eval_result  # noqa: E402
-
-    remasking_cfg = cfg.eval.remasking
-    unmasking_mode = cfg.eval.get("unmasking_mode", "random")
-    top_p = cfg.eval.get("top_p", None)
-
-    # Build systematic method name: {unmasking}_{sampling}_{remasking}
-    unmask_tag = unmasking_mode
-    if top_p is not None and top_p < 1.0:
-        sampling_tag = f"topp{top_p}"
-    elif cfg.eval.temperature == 0.0:
-        sampling_tag = "argmax"
-    else:
-        sampling_tag = f"temp{cfg.eval.temperature}"
-
-    if remasking_cfg.enabled:
-        if remasking_cfg.strategy == "confidence":
-            t_sw = remasking_cfg.get("t_switch", 1.0)
-            remask_tag = f"remdm_confidence_tsw{t_sw}"
-        else:
-            remask_tag = (
-                f"remdm_{remasking_cfg.strategy}_eta{remasking_cfg.eta}"
-            )
-    else:
-        remask_tag = "no_remask"
-    method_name = f"{unmask_tag}_{sampling_tag}_{remask_tag}"
-    if is_v2:
-        method_name = f"v2_{method_name}"
-
-    # Save to schedule-specific subdirectory (e.g., eval_results/linear/)
-    schedule_tag = cfg.noise.type  # "linear", "loglinear", or "cosine"
-    eval_results_dir = _PROJECT_ROOT / "eval_results" / schedule_tag
-    eval_results_dir.mkdir(parents=True, exist_ok=True)
-    eval_result_path = eval_results_dir / f"{method_name}.json"
-    save_eval_result(
-        path=eval_result_path,
-        method=method_name,
-        config_dict={
-            "seeds": seeds,
-            "num_samples": cfg.eval.num_samples,
-            "sampling_steps": cfg.eval.sampling_steps,
-            "temperature": cfg.eval.temperature,
-            "top_p": top_p,
-            "unmasking_mode": unmasking_mode,
-            "remasking_enabled": remasking_cfg.enabled,
-            "remasking_strategy": (
-                remasking_cfg.strategy if remasking_cfg.enabled
-                else None
-            ),
-            "remasking_eta": (
-                remasking_cfg.eta if remasking_cfg.enabled
-                else None
-            ),
-            "remasking_t_switch": (
-                remasking_cfg.get("t_switch", 1.0) if remasking_cfg.enabled
-                else None
-            ),
-            "checkpoint": str(ckpt_path.name),
-        },
-        per_seed_metrics={
-            s: _make_json_serializable(m)
-            for s, m in per_seed_results.items()
-        },
-        summary_metrics=summary,
-        denoising_metrics=denoising_metrics if denoising_metrics else None,
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Compute metrics from saved sample tokens (CPU only).",
     )
-    logger.info("Structured result saved: %s", eval_result_path)
+    parser.add_argument(
+        "--schedule", type=str, required=True,
+        help="Noise schedule subdirectory (e.g., 'loglinear', 'linear').",
+    )
+    parser.add_argument(
+        "--model", type=str, default=None,
+        help="Single model name to evaluate (without extension).",
+    )
+    parser.add_argument(
+        "--list", action="store_true",
+        help="List models with/without saved samples and exit.",
+    )
+    parser.add_argument(
+        "--n-max", type=int, default=8,
+        help="Maximum rooms per graph (default: 8).",
+    )
+    parser.add_argument(
+        "--update-comparison", action="store_true",
+        help="Regenerate comparison.md after evaluation.",
+    )
+    parser.add_argument(
+        "--conditional-topn", type=int, default=20,
+        help="Top-N pairs for conditional metrics (default: 20).",
+    )
+    args = parser.parse_args()
 
-    # --- Save samples (from last seed) ---
-    if cfg.eval.save_samples:
-        # Re-generate with last seed for reproducible sample saving
-        last_seed = seeds[-1]
-        set_seed(last_seed)
-        viz_tokens = []
-        with torch.no_grad():
-            for start in range(0, min(cfg.eval.num_samples, cfg.eval.batch_size),
-                               cfg.eval.batch_size):
-                bs = min(cfg.eval.batch_size, cfg.eval.num_samples - start)
-                batch_tokens = sample(
-                    model=model,
-                    noise_schedule=noise_schedule,
-                    vocab_config=vocab_config,
-                    batch_size=bs,
-                    num_steps=cfg.eval.sampling_steps,
-                    temperature=cfg.eval.temperature,
-                    top_p=cfg.eval.get("top_p", None),
-                    unmasking_mode=cfg.eval.get("unmasking_mode", "random"),
-                    t_switch=cfg.eval.remasking.get("t_switch", 1.0),
-                    remasking_fn=remasking_fn,
-                    rate_network=rate_network,
-                    num_rooms_distribution=num_rooms_dist,
-                    device=device,
-                )
-                viz_tokens.append(batch_tokens.cpu())
-        viz_tokens = torch.cat(viz_tokens, dim=0)
-        viz_pad = _reconstruct_pad_masks(viz_tokens, vocab_config)
-        torch.save({"tokens": viz_tokens, "pad_masks": viz_pad},
-                    output_dir / "samples.pt")
+    eval_dir = _PROJECT_ROOT / "eval_results" / args.schedule
+    if not eval_dir.is_dir():
+        print(f"Error: directory not found: {eval_dir}")
+        sys.exit(1)
 
-    # --- Visualize ---
-    if cfg.eval.visualize:
-        # Use samples from last seed
-        last_seed_metrics = per_seed_results[seeds[-1]]
-        # Re-detokenize for viz (use saved tokens if available)
-        try:
-            saved = torch.load(output_dir / "samples.pt", weights_only=True)
-            viz_tokens_t = saved["tokens"]
-            viz_pads_t = saved["pad_masks"]
-            viz_dicts = []
-            n_viz = min(cfg.eval.num_viz_samples, viz_tokens_t.size(0))
-            for i in range(n_viz):
-                try:
-                    gd = detokenize(viz_tokens_t[i], viz_pads_t[i], vocab_config)
-                    if gd["num_rooms"] > 0:
-                        viz_dicts.append(gd)
-                except ValueError:
-                    pass
-        except FileNotFoundError:
-            viz_dicts = []
+    # Find models with saved samples
+    sample_files = sorted(eval_dir.glob("*_samples.pt"))
+    available = {p.stem.replace("_samples", ""): p for p in sample_files}
 
-        if viz_dicts:
-            fig = draw_bubble_diagram_grid(viz_dicts)
-            fig_path = output_dir / "samples.png"
-            fig.savefig(fig_path, dpi=150, bbox_inches="tight")
-            logger.info("Visualization saved: %s", fig_path)
-            try:
-                wandb.log({"eval/samples": wandb.Image(str(fig_path))})
-            except Exception:
-                pass
-            import matplotlib.pyplot as plt
-            plt.close(fig)
+    if args.list:
+        print(f"\nModels WITH saved samples ({args.schedule}):")
+        for name in sorted(available):
+            size_mb = available[name].stat().st_size / 1e6
+            print(f"  {name} ({size_mb:.1f} MB)")
 
-    wandb.finish()
-    logger.info("Evaluation complete. Output: %s", output_dir)
+        json_files = sorted(eval_dir.glob("*.json"))
+        no_samples = [
+            p.stem for p in json_files
+            if p.stem not in available and p.stem != "comparison"
+        ]
+        if no_samples:
+            print("\nModels WITHOUT saved samples (need generate_samples.py):")
+            for name in no_samples:
+                print(f"  {name}")
+        if not available and not no_samples:
+            print("  (none)")
+        return
 
+    # Determine targets
+    if args.model:
+        if args.model not in available:
+            print(f"Error: no samples found for '{args.model}'")
+            if available:
+                print(f"Available: {', '.join(sorted(available))}")
+            sys.exit(1)
+        targets = {args.model: available[args.model]}
+    else:
+        targets = available
 
-def _make_json_serializable(obj):
-    """Recursively convert numpy types and other non-serializable values."""
-    if isinstance(obj, dict):
-        return {k: _make_json_serializable(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_make_json_serializable(v) for v in obj]
-    if isinstance(obj, np.floating):
-        return float(obj)
-    if isinstance(obj, np.integer):
-        return int(obj)
-    return obj
+    if not targets:
+        print(f"No sample files found in {eval_dir}")
+        sys.exit(1)
+
+    # Load training data (one-time)
+    train_dicts = load_train_dicts(n_max=args.n_max)
+
+    # Evaluate each target
+    for method_name, samples_pt in sorted(targets.items()):
+        logger.info("Evaluating: %s", method_name)
+        evaluate_method(
+            samples_path=samples_pt,
+            eval_dir=eval_dir,
+            train_dicts=train_dicts,
+            n_max=args.n_max,
+            conditional_topN_pairs=args.conditional_topn,
+        )
+
+    # Optionally regenerate comparison table
+    if args.update_comparison:
+        json_files = sorted(eval_dir.glob("*.json"))
+        result_jsons = [p for p in json_files if p.stem != "comparison"]
+        if result_jsons:
+            md = build_comparison_table(result_jsons)
+            comp_path = eval_dir / "comparison.md"
+            comp_path.write_text(md)
+            logger.info("Comparison updated: %s", comp_path)
 
 
 if __name__ == "__main__":
-    cli_overrides = sys.argv[1:]
-    config = _load_config(cli_overrides)
-    evaluate(config)
+    main()

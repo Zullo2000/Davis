@@ -54,6 +54,10 @@
 - `EDGE_VOCAB_SIZE = 13` (10 relationships + no-edge + MASK + PAD)
 - The inverse of relationship `r` is simply `9 - r` (Graph2Plan ordered types symmetrically).
 
+### Note on MasterRoom inside LivingRoom
+
+An audit of the 80,788 RPLAN samples against the forbidden containment rules in [inside_surrounding_rules.md](../inside_surrounding_rules.md) found 5,509 violations (6.82%). Of these, 5,333 (96.8%) are "MasterRoom inside LivingRoom". This prevalence indicates it is a legitimate annotation pattern in the dataset (e.g. open-plan layouts where the master suite is spatially contained within the living area), not noise. Accordingly, this pair is excluded from the forbidden list in `inside_surrounding_rules.md`.
+
 ---
 
 ## Edge Directionality

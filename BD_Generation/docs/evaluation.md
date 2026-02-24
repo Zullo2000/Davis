@@ -150,6 +150,25 @@ print(f"H-consistent: {st['h_consistent']:.1%}")
 print(f"V-consistent: {st['v_consistent']:.1%}")
 ```
 
+### Inside Validity
+
+`inside_validity(graph_dicts)` checks whether generated bubble diagrams contain architecturally implausible containment relationships — e.g., a LivingRoom inside a Bathroom, or a Kitchen inside a Storage room.
+
+**How it works.** For each graph, every edge with `rel=4` (inside) or `rel=5` (surrounding) is checked against a set of 69 forbidden `(A_type, B_type)` pairs. If `rel=4`, the pair is `(node_types[u], node_types[v])` — "u is inside v". If `rel=5`, the pair is `(node_types[v], node_types[u])` — "v is inside u". A single forbidden match flags the sample as invalid.
+
+**Formula:** `inside_validity = count(samples with zero violations) / total_samples`
+
+**The forbidden pairs** are defined in [inside_surrounding_rules.md](../inside_surrounding_rules.md). They encode size and functional constraints: large rooms should not be inside small rooms (LivingRoom inside Storage), and functionally incompatible containment should not occur (Kitchen inside Bathroom). The pair "MasterRoom inside LivingRoom" is **not** forbidden — it appears in 6.6% of RPLAN samples and represents a legitimate open-plan annotation pattern (see [vocab.md](vocab.md#note-on-masterroom-inside-livingroom)).
+
+**RPLAN baseline:** 99.78% (176 violations out of 80,788 samples).
+
+```python
+from bd_gen.eval.metrics import inside_validity
+
+score = inside_validity(graph_dicts)
+print(f"Inside validity: {score:.1%}")  # higher is better
+```
+
 ### Type-Conditioned Degree KL
 
 `type_conditioned_degree_kl(samples, reference, n_max=8, min_type_count=20)` measures whether each room type has a realistic number of connections.

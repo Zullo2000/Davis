@@ -19,7 +19,6 @@ Convention: edge `(i, j, 4)` = "i inside j"; edge `(i, j, 5)` = "i surrounds j".
 | 0 | LivingRoom | 9 | Balcony |
 | 0 | LivingRoom | 10 | Entrance |
 | 0 | LivingRoom | 11 | Storage |
-| 1 | MasterRoom | 0 | LivingRoom |
 | 1 | MasterRoom | 2 | Kitchen |
 | 1 | MasterRoom | 3 | Bathroom |
 | 1 | MasterRoom | 4 | DiningRoom |

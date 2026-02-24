@@ -805,3 +805,52 @@ v2 learned rates deliver exactly what MELD promises: reduced state clashing prod
 1. Add remasking on top of v2 (main diversity driver in v1)
 2. Try `random` unmasking mode with v2
 3. Increase top-p (e.g., 0.95) to inject more sampling stochasticity
+
+---
+
+## Post-v1 — Evaluation Pipeline Split (Generate vs Evaluate)
+Status: IN PROGRESS (code complete, backfill pending)
+
+### Problem
+The monolithic `evaluate.py` coupled GPU generation and CPU metric computation
+in one script. Adding a new metric required re-running generation for all 23
+models × 5 seeds × 1000 samples, even though generation is the only expensive
+step and all metrics are pure CPU.
+
+### Solution: two scripts with clear responsibilities
+1. **`scripts/generate_samples.py`** (GPU): loads model, generates tokens per
+   seed, saves `{method}_samples.pt` to `eval_results/{schedule}/`. No metrics.
+2. **`scripts/evaluate.py`** (CPU only): loads saved tokens, detokenizes,
+   computes ALL metrics unconditionally, saves/updates `{method}.json`.
+
+### Files created (2 new)
+- `scripts/generate_samples.py` — GPU generation, Hydra CLI, saves `.pt`
+- `scripts/evaluate.py` — CPU metrics, argparse CLI (`--schedule`, `--model`,
+  `--list`, `--update-comparison`)
+
+### Files modified (1)
+- `eval_results/save_utils.py` — `_make_json_serializable` → `make_json_serializable`
+  (public), added `aggregate_multi_seed()` (moved from old evaluate.py)
+
+### Files renamed (1)
+- `scripts/evaluate.py` → `scripts/generate_and_evaluate.py`
+  **Transition backup only.** Kept so existing workflows don't break while the 23
+  models are backfilled with `_samples.pt` files. Once all models have saved
+  samples, this file is dead code and should be deleted.
+
+### `.pt` format
+```python
+{format_version: 1, method, n_max, seeds, num_samples, config,
+ per_seed: {str(seed): {tokens: Tensor(N, S), pad_masks: Tensor(N, S)}}}
+```
+Storage: ~1.6 MB per method (5 seeds × 1000 × 36 tokens). 23 methods ≈ 37 MB.
+
+### Backfill needed
+The 23 existing models lack `_samples.pt` files. Each needs one final GPU run
+with `generate_samples.py`. After that, all future metric additions are instant:
+```bash
+# One-time (GPU)
+python scripts/generate_samples.py eval.checkpoint_path=path/to/ckpt.pt
+# Any time (CPU only)
+python scripts/evaluate.py --schedule loglinear --model <method>
+```

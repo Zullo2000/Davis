@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 # ---------------------------------------------------------------------------
 # Metric family registry -- defines comparison table structure
 # ---------------------------------------------------------------------------
@@ -23,6 +25,7 @@ _VALIDITY_METRICS: list[tuple[str, str, bool, bool]] = [
     ("eval/connected_rate", "Connected rate", True, False),
     ("eval/valid_types_rate", "Valid types rate", True, False),
     ("eval/no_mask_rate", "No MASK rate", True, False),
+    ("eval/inside_validity", "Inside validity", True, False),
 ]
 
 _COVERAGE_METRICS: list[tuple[str, str, bool, bool]] = [
@@ -56,12 +59,15 @@ _STRUCTURE_METRICS: list[tuple[str, str, bool, bool]] = [
 _CONDITIONAL_METRICS: list[tuple[str, str, bool, bool]] = [
     ("eval/conditional_edge_js_weighted", "Cond. edge JS (weighted)", False, False),
     ("eval/conditional_edge_tv_weighted", "Cond. edge TV (weighted)", False, False),
-    ("eval/conditional_edge_js_topN_weighted", "Cond. edge JS top-N (wt.)", False, False),
-    ("eval/conditional_edge_tv_topN_weighted", "Cond. edge TV top-N (wt.)", False, False),
+    ("eval/conditional_edge_js_topN_weighted",
+     "Cond. edge JS top-N (wt.)", False, False),
+    ("eval/conditional_edge_tv_topN_weighted",
+     "Cond. edge TV top-N (wt.)", False, False),
     ("eval/degree_js_per_type_weighted", "Type-cond. degree JS (wt.)", False, False),
     ("eval/degree_tv_per_type_weighted", "Type-cond. degree TV (wt.)", False, False),
     ("eval/conditional_edge_kl_weighted", "Cond. edge KL (wt., diag.)", False, True),
-    ("eval/conditional_edge_kl_topN_weighted", "Cond. edge KL top-N (diag.)", False, True),
+    ("eval/conditional_edge_kl_topN_weighted",
+     "Cond. edge KL top-N (diag.)", False, True),
     ("eval/degree_kl_per_type_weighted", "Type-cond. degree KL (diag.)", False, True),
 ]
 
@@ -109,15 +115,63 @@ def _format_mean_std(
     return f"{mean:.4f} +/- {std:.4f}"
 
 
-def _make_json_serializable(obj: Any) -> Any:
+def make_json_serializable(obj: Any) -> Any:
     """Recursively convert numpy types and other non-JSON types."""
     if isinstance(obj, dict):
-        return {str(k): _make_json_serializable(v) for k, v in obj.items()}
+        return {str(k): make_json_serializable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [_make_json_serializable(v) for v in obj]
+        return [make_json_serializable(v) for v in obj]
     if hasattr(obj, "item"):  # numpy scalar
         return obj.item()
     return obj
+
+
+# ---------------------------------------------------------------------------
+# Multi-seed aggregation
+# ---------------------------------------------------------------------------
+
+
+def aggregate_multi_seed(
+    per_seed_results: dict[int, dict],
+) -> dict[str, dict[str, float]]:
+    """Aggregate scalar metrics across seeds into mean/std.
+
+    Nested dicts (stratified metrics) are flattened with ``/`` separators
+    and aggregated leaf-by-leaf.
+
+    Returns:
+        Dict mapping metric_name to {"mean": ..., "std": ...}.
+    """
+
+    def _flatten(d: dict, prefix: str = "") -> dict[str, float]:
+        flat: dict[str, float] = {}
+        for k, v in d.items():
+            key = f"{prefix}/{k}" if prefix else k
+            if isinstance(v, (int, float)):
+                flat[key] = float(v)
+            elif isinstance(v, dict):
+                flat.update(_flatten(v, key))
+        return flat
+
+    all_flat: dict[int, dict[str, float]] = {}
+    for seed, metrics in per_seed_results.items():
+        all_flat[seed] = _flatten(metrics)
+
+    all_keys: set[str] = set()
+    for flat in all_flat.values():
+        all_keys.update(flat.keys())
+
+    summary: dict[str, dict[str, float]] = {}
+    for key in sorted(all_keys):
+        values = [flat[key] for flat in all_flat.values() if key in flat]
+        if values:
+            arr = np.array(values, dtype=np.float64)
+            summary[key] = {
+                "mean": float(arr.mean()),
+                "std": float(arr.std(ddof=0)),
+            }
+
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -147,13 +201,13 @@ def save_eval_result(
         "format_version": 2,
         "method": method,
         "timestamp": datetime.now().isoformat(),
-        "config": _make_json_serializable(config_dict),
+        "config": make_json_serializable(config_dict),
         "per_seed": {
-            str(k): _make_json_serializable(v)
+            str(k): make_json_serializable(v)
             for k, v in per_seed_metrics.items()
         },
-        "summary": _make_json_serializable(summary_metrics),
-        "denoising": _make_json_serializable(denoising_metrics or {}),
+        "summary": make_json_serializable(summary_metrics),
+        "denoising": make_json_serializable(denoising_metrics or {}),
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
