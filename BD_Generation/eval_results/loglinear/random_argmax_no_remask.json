@@ -1,7 +1,7 @@
 {
   "format_version": 2,
   "method": "random_argmax_no_remask",
-  "timestamp": "2026-02-19T17:41:16.659157",
+  "timestamp": "2026-02-24T20:08:11.096238",
   "config": {
     "seeds": [
       42,
@@ -68,6 +68,7 @@
       "eval/connected_rate": 1.0,
       "eval/valid_types_rate": 0.997,
       "eval/no_mask_rate": 1.0,
+      "eval/inside_validity": 0.944,
       "validity_by_num_rooms": {
         "4": {
           "connected": 1.0,
@@ -191,6 +192,7 @@
       "eval/connected_rate": 1.0,
       "eval/valid_types_rate": 1.0,
       "eval/no_mask_rate": 1.0,
+      "eval/inside_validity": 0.951,
       "validity_by_num_rooms": {
         "4": {
           "connected": 1.0,
@@ -314,6 +316,7 @@
       "eval/connected_rate": 1.0,
       "eval/valid_types_rate": 1.0,
       "eval/no_mask_rate": 1.0,
+      "eval/inside_validity": 0.946,
       "validity_by_num_rooms": {
         "4": {
           "connected": 1.0,
@@ -437,6 +440,7 @@
       "eval/connected_rate": 1.0,
       "eval/valid_types_rate": 0.998,
       "eval/no_mask_rate": 1.0,
+      "eval/inside_validity": 0.941,
       "validity_by_num_rooms": {
         "4": {
           "connected": 1.0,
@@ -560,6 +564,7 @@
       "eval/connected_rate": 1.0,
       "eval/valid_types_rate": 0.999,
       "eval/no_mask_rate": 1.0,
+      "eval/inside_validity": 0.948,
       "validity_by_num_rooms": {
         "4": {
           "connected": 1.0,
@@ -754,6 +759,10 @@
     "eval/h_consistent": {
       "mean": 0.9992000000000001,
       "std": 0.0007483314773547889
+    },
+    "eval/inside_validity": {
+      "mean": 0.9460000000000001,
+      "std": 0.0034058772731852833
     },
     "eval/mmd_clustering": {
       "mean": 0.050109766954341904,

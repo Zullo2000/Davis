@@ -47,6 +47,9 @@ BD_Generation/Data/
 BD_Generation/data/
 BD_Generation/data_cache/
 
+# ---- Eval sample files (large, generated on GPU server) ----
+BD_Generation/eval_results/**/*_samples.pt
+
 # ---- Experiment outputs ----
 BD_Generation/outputs/
 BD_Generation/wandb/

@@ -1,9 +1,7 @@
 # Evaluation Comparison
 
-**Generated**: 2026-02-20 19:58
+**Generated**: 2026-02-24 20:21
 **Methods**: llada_argmax_no_remask, llada_topp0.9_no_remask, llada_topp0.9_remdm_cap_eta0.2, llada_topp0.9_remdm_cap_eta0.4, llada_topp0.9_remdm_cap_eta0.6, llada_topp0.9_remdm_cap_eta0.8, llada_topp0.9_remdm_cap_eta1.0, llada_topp0.9_remdm_confidence_tsw0.3, llada_topp0.9_remdm_confidence_tsw0.5, llada_topp0.9_remdm_confidence_tsw0.7, llada_topp0.9_remdm_confidence_tsw1.0, random_argmax_no_remask, random_topp0.9_no_remask, random_topp0.9_remdm_cap_eta0.2, random_topp0.9_remdm_cap_eta0.4, random_topp0.9_remdm_cap_eta0.6, random_topp0.9_remdm_cap_eta0.8, random_topp0.9_remdm_cap_eta1.0, random_topp0.9_remdm_confidence_tsw0.3, random_topp0.9_remdm_confidence_tsw0.5, random_topp0.9_remdm_confidence_tsw0.7, random_topp0.9_remdm_confidence_tsw1.0, v2_llada_topp0.9_no_remask
-**Script**: run this file on the terminal if you want to run the compariosn between two models: python scripts/compare_selected.py --schedule loglinear --models llada_topp0.9_remdm_confidence_tsw0.5 v2_llada_topp0.9_no_remask
-
 
 ## Configuration
 
@@ -29,6 +27,7 @@
 | Connected rate | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0 +/- 0.0% | 100.0 +/- 0.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0 +/- 0.0% | 100.0% | 100.0% | 100.0% |
 | Valid types rate | 100.0% | 100.0% | 99.9 +/- 0.1% | 99.8 +/- 0.1% | 99.8 +/- 0.2% | 99.8 +/- 0.2% | 99.8 +/- 0.2% | 99.9 +/- 0.1% | 99.8 +/- 0.1% | 99.8 +/- 0.1% | 99.7 +/- 0.1% | 99.9 +/- 0.1% | 99.7 +/- 0.2% | 98.3 +/- 0.2% | 98.0 +/- 0.3% | 97.9 +/- 0.4% | 97.9 +/- 0.4% | 97.9 +/- 0.4% | 98.0 +/- 0.2% | 98.2 +/- 0.5% | 98.1 +/- 0.3% | 98.2 +/- 0.5% | 100.0% |
 | No MASK rate | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% |
+| Inside validity | 100.0% | 99.4 +/- 0.3% | 98.0 +/- 0.2% | 94.0 +/- 0.6% | 93.4 +/- 1.1% | 93.4 +/- 1.1% | 93.4 +/- 1.1% | 95.9 +/- 0.5% | 93.8 +/- 0.7% | 93.3 +/- 0.9% | 93.3 +/- 0.5% | 94.6 +/- 0.3% | 84.0 +/- 0.9% | 59.3 +/- 1.3% | 57.3 +/- 0.8% | 57.5 +/- 1.1% | 57.5 +/- 1.1% | 57.5 +/- 1.1% | 55.6 +/- 2.1% | 55.2 +/- 1.2% | 54.3 +/- 1.4% | 54.3 +/- 1.1% | 100.0 +/- 0.0% |
 
 ## Coverage
 
