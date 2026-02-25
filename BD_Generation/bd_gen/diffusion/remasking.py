@@ -54,8 +54,9 @@ class RemaskingSchedule:
         self,
         strategy: str,
         eta: float,
-        noise_schedule: NoiseSchedule,
+        noise_schedule: NoiseSchedule | None,  # None when using rate_network
         vocab_config: VocabConfig,
+        rate_network: torch.nn.Module | None = None,  # NEW
     ) -> None:
         if strategy not in ("cap", "rescale", "confidence"):
             raise ValueError(
@@ -64,10 +65,15 @@ class RemaskingSchedule:
             )
         if eta < 0:
             raise ValueError(f"eta must be non-negative, got {eta}")
+        if noise_schedule is None and rate_network is None:
+            raise ValueError(
+                "Either noise_schedule or rate_network must be provided."
+            )
         self.strategy = strategy
         self.eta = eta
         self.noise_schedule = noise_schedule
         self.vocab_config = vocab_config
+        self.rate_network = rate_network
 
     def _compute_sigma_max(
         self,
@@ -75,6 +81,7 @@ class RemaskingSchedule:
         t_next: float,
         batch_size: int,
         device: torch.device,
+        pad_mask: Tensor | None = None,  # NEW: required for rate_network
     ) -> Tensor:
         """Compute the upper-bound remasking probability sigma_max in float64.
 
@@ -85,10 +92,25 @@ class RemaskingSchedule:
             t_next: Destination timestep (cleaner, lower t).
             batch_size: Batch size (for broadcasting).
             device: Target device.
+            pad_mask: (B, SEQ_LEN) bool tensor, required for rate_network path.
 
         Returns:
-            (B, 1) float32 tensor of sigma_max values.
+            (B, 1) for v1 or (B, SEQ_LEN) for v2 float32 tensor.
         """
+        if self.rate_network is not None:
+            # v2 path: per-position alpha from rate network
+            t_now_tensor = torch.full(
+                (batch_size,), t_now, dtype=torch.float32, device=device,
+            )
+            t_next_tensor = torch.full(
+                (batch_size,), t_next, dtype=torch.float32, device=device,
+            )
+            alpha_t = self.rate_network(t_now_tensor, pad_mask).double()
+            alpha_s = self.rate_network(t_next_tensor, pad_mask).double()
+            sigma_max = (1.0 - alpha_s) / (alpha_t + 1e-8)
+            sigma_max = torch.clamp(sigma_max, min=0.0, max=1.0)
+            return sigma_max.float()  # (B, SEQ_LEN)
+
         t_now_tensor = torch.full(
             (batch_size,), t_now, dtype=torch.float64, device=device
         )
@@ -247,8 +269,8 @@ class RemaskingSchedule:
         device = x_t.device
 
         # --- Step 1: Base sigma (sigma_max from noise schedule, no eta) ---
-        sigma_max = self._compute_sigma_max(t_now, t_next, batch_size, device)
-        # (B, 1) — this is the total remasking budget
+        sigma_max = self._compute_sigma_max(t_now, t_next, batch_size, device, pad_mask)
+        # (B, 1) or (B, SEQ_LEN) — this is the total remasking budget
 
         # --- Step 2: Per-position confidence ---
         # Confidence = P(decoded_token) from the model's softmax output.
@@ -293,15 +315,17 @@ class RemaskingSchedule:
 
 def create_remasking_schedule(
     config: dict,
-    noise_schedule: NoiseSchedule,
+    noise_schedule: NoiseSchedule | None,  # None allowed when rate_network provided
     vocab_config: VocabConfig,
+    rate_network: torch.nn.Module | None = None,  # NEW
 ) -> RemaskingSchedule | None:
     """Factory: create a RemaskingSchedule from a config dict, or None if disabled.
 
     Args:
         config: Dict-like with keys "enabled" (bool), "strategy" (str), "eta" (float).
-        noise_schedule: NoiseSchedule for alpha(t) computation.
+        noise_schedule: NoiseSchedule for alpha(t). None when using rate_network.
         vocab_config: VocabConfig for sequence layout.
+        rate_network: Optional rate network for v2 learned forward process.
 
     Returns:
         RemaskingSchedule if enabled, else None.
@@ -313,4 +337,5 @@ def create_remasking_schedule(
         eta=config["eta"],
         noise_schedule=noise_schedule,
         vocab_config=vocab_config,
+        rate_network=rate_network,  # NEW
     )

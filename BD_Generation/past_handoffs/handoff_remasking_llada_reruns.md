@@ -102,7 +102,7 @@ done
 **Read first (in order):**
 1. `BD_Generation/implementation_state_T1.md` — lines 572-638 for remasking comparison status
 2. `BD_Generation/eval_results/loglinear/comparison.md` — current 12-run results table
-3. `BD_Generation/remasking_design.md` — Section 10 for experiment design rationale
+3. `BD_Generation/remasking_design_with_fixed_forward_process.md` — Section 10 for experiment design rationale
 
 **Key implementation files:**
 4. `BD_Generation/bd_gen/diffusion/noise_schedule.py` — LogLinearSchedule

@@ -12,7 +12,6 @@ an optional remasking function for ReMDM-style inference.
 from __future__ import annotations
 
 import logging
-import warnings
 from typing import Callable
 
 import torch
@@ -191,14 +190,6 @@ def sample(
     n_max = vocab_config.n_max
     seq_len = vocab_config.seq_len
 
-    if rate_network is not None and remasking_fn is not None:
-        warnings.warn(
-            "rate_network and remasking_fn both provided. Remasking with "
-            "learned rates is not yet supported; remasking will be skipped.",
-            stacklevel=2,
-        )
-        remasking_fn = None
-
     # --- Step 1: Determine num_rooms per sample ---
     if fixed_num_rooms is not None:
         num_rooms_list = [fixed_num_rooms] * batch_size
@@ -257,7 +248,9 @@ def sample(
             t_next_tensor = torch.full(
                 (batch_size,), t_next, dtype=torch.float32, device=device,
             )
-            alpha_next_64 = rate_network(t_next_tensor, pad_mask).double()  # (B, SEQ_LEN)
+            alpha_next_64 = rate_network(  # (B, SEQ_LEN)
+                t_next_tensor, pad_mask,
+            ).double()
             p_unmask = (alpha_next_64 - alpha_now_64) / (1.0 - alpha_now_64 + 1e-8)
             p_unmask = torch.clamp(p_unmask, min=0.0, max=1.0).float()
             # p_unmask is (B, SEQ_LEN) — per-position

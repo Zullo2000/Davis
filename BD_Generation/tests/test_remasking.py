@@ -13,6 +13,7 @@ from bd_gen.data.vocab import (
     NODE_PAD_IDX,
     NODE_VOCAB_SIZE,
 )
+from bd_gen.diffusion.rate_network import RateNetwork
 from bd_gen.diffusion.remasking import (
     RemaskingSchedule,
     create_remasking_schedule,
@@ -836,3 +837,236 @@ class TestConfidenceIntegration:
             "Confidence remasking should produce different output than cap "
             "(tried 3 seeds, all matched — unexpected)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fixtures: v2 (learned forward process)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def rate_net(vocab_config):
+    """RateNetwork for v2 per-position alpha."""
+    return RateNetwork(vocab_config)
+
+
+@pytest.fixture
+def v2_confidence_remasking(rate_net, vocab_config):
+    """RemaskingSchedule with confidence strategy using rate_network."""
+    return RemaskingSchedule(
+        strategy="confidence",
+        eta=0.0,
+        noise_schedule=None,
+        vocab_config=vocab_config,
+        rate_network=rate_net,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests: v2 per-position sigma_max (rate_network)
+# ---------------------------------------------------------------------------
+
+
+class TestV2SigmaMax:
+    """Tests for per-position sigma_max with rate_network."""
+
+    def test_v2_sigma_max_shape(self, rate_net, vocab_config):
+        """v2 sigma_max should be (B, SEQ_LEN), not (B, 1)."""
+        rs = RemaskingSchedule(
+            "confidence", 0.0, noise_schedule=None,
+            vocab_config=vocab_config, rate_network=rate_net,
+        )
+        B = 4
+        pad_mask = torch.stack(
+            [vocab_config.compute_pad_mask(4) for _ in range(B)]
+        )
+        sigma = rs._compute_sigma_max(
+            0.5, 0.4, batch_size=B, device=torch.device("cpu"),
+            pad_mask=pad_mask,
+        )
+        assert sigma.shape == (B, vocab_config.seq_len), (
+            f"Expected (B, SEQ_LEN) but got {sigma.shape}"
+        )
+        assert sigma.dtype == torch.float32
+
+    def test_v1_sigma_max_shape_unchanged(self, linear_schedule, vocab_config):
+        """v1 sigma_max should still be (B, 1)."""
+        rs = RemaskingSchedule(
+            "cap", 0.1, noise_schedule=linear_schedule,
+            vocab_config=vocab_config,
+        )
+        sigma = rs._compute_sigma_max(
+            0.5, 0.4, batch_size=2, device=torch.device("cpu"),
+        )
+        assert sigma.shape == (2, 1)
+
+    def test_v2_pad_sigma_zero(self, rate_net, vocab_config):
+        """PAD positions have sigma_max=0 (rate_network alpha=1)."""
+        rs = RemaskingSchedule(
+            "confidence", 0.0, noise_schedule=None,
+            vocab_config=vocab_config, rate_network=rate_net,
+        )
+        B = 2
+        num_rooms = 3
+        pad_mask = torch.stack(
+            [vocab_config.compute_pad_mask(num_rooms) for _ in range(B)]
+        )
+        sigma = rs._compute_sigma_max(
+            0.5, 0.4, batch_size=B, device=torch.device("cpu"),
+            pad_mask=pad_mask,
+        )
+        # PAD positions: pad_mask is False
+        pad_positions = ~pad_mask
+        assert (sigma[pad_positions] == 0.0).all(), (
+            "PAD positions should have sigma_max = 0"
+        )
+
+    def test_v2_real_sigma_positive(self, rate_net, vocab_config):
+        """Real (non-PAD) positions should have sigma_max > 0 at mid-timestep."""
+        rs = RemaskingSchedule(
+            "confidence", 0.0, noise_schedule=None,
+            vocab_config=vocab_config, rate_network=rate_net,
+        )
+        B = 2
+        pad_mask = torch.stack(
+            [vocab_config.compute_pad_mask(vocab_config.n_max) for _ in range(B)]
+        )
+        sigma = rs._compute_sigma_max(
+            0.5, 0.4, batch_size=B, device=torch.device("cpu"),
+            pad_mask=pad_mask,
+        )
+        # All positions are real (8 rooms)
+        assert (sigma > 0).all(), (
+            "Real positions should have positive sigma_max"
+        )
+
+    def test_v2_sigma_bounded(self, rate_net, vocab_config):
+        """sigma_max should be in [0, 1] for all positions."""
+        rs = RemaskingSchedule(
+            "confidence", 0.0, noise_schedule=None,
+            vocab_config=vocab_config, rate_network=rate_net,
+        )
+        B = 4
+        pad_mask = torch.stack(
+            [vocab_config.compute_pad_mask(4) for _ in range(B)]
+        )
+        sigma = rs._compute_sigma_max(
+            0.9, 0.0, batch_size=B, device=torch.device("cpu"),
+            pad_mask=pad_mask,
+        )
+        assert (sigma >= 0).all() and (sigma <= 1.0 + 1e-6).all()
+
+    def test_constructor_requires_schedule_or_rate(self, vocab_config):
+        """Constructor should raise if both noise_schedule and rate_network are None."""
+        with pytest.raises(ValueError, match="Either noise_schedule or rate_network"):
+            RemaskingSchedule(
+                "cap", 0.1, noise_schedule=None, vocab_config=vocab_config,
+            )
+
+    def test_constructor_accepts_rate_network_only(self, rate_net, vocab_config):
+        """Constructor should accept rate_network without noise_schedule."""
+        rs = RemaskingSchedule(
+            "confidence", 0.0, noise_schedule=None,
+            vocab_config=vocab_config, rate_network=rate_net,
+        )
+        assert rs.rate_network is rate_net
+        assert rs.noise_schedule is None
+
+
+class TestV2ConfidenceRemasking:
+    """Confidence remasking with v2 per-position sigma_max."""
+
+    def test_v2_confidence_pad_never_remasked(self, v2_confidence_remasking,
+                                                vocab_config):
+        """PAD positions must never be remasked with v2 rate_network."""
+        vc = vocab_config
+        torch.manual_seed(0)
+
+        for _ in range(100):
+            B = 4
+            num_rooms = torch.randint(1, vc.n_max + 1, (B,)).tolist()
+            x_t = torch.zeros(B, vc.seq_len, dtype=torch.long)
+            pad_mask = torch.zeros(B, vc.seq_len, dtype=torch.bool)
+
+            for b in range(B):
+                nr = num_rooms[b]
+                pm = vc.compute_pad_mask(nr)
+                pad_mask[b] = pm
+                for k in range(nr):
+                    x_t[b, k] = k % 10
+                for k in range(nr, vc.n_max):
+                    x_t[b, k] = NODE_PAD_IDX
+                for pos in range(vc.n_edges):
+                    seq_idx = vc.n_max + pos
+                    if pm[seq_idx]:
+                        x_t[b, seq_idx] = pos % 10
+                    else:
+                        x_t[b, seq_idx] = EDGE_PAD_IDX
+
+            node_logits = torch.randn(B, vc.n_max, NODE_VOCAB_SIZE)
+            edge_logits = torch.randn(B, vc.n_edges, EDGE_VOCAB_SIZE)
+
+            result = v2_confidence_remasking(
+                x_t, t_now=0.5, t_next=0.4, pad_mask=pad_mask,
+                node_logits=node_logits, edge_logits=edge_logits,
+            )
+
+            for b in range(B):
+                nr = num_rooms[b]
+                for k in range(nr, vc.n_max):
+                    assert result[b, k] == NODE_PAD_IDX
+                for pos in range(vc.n_edges):
+                    seq_idx = vc.n_max + pos
+                    if not pad_mask[b, seq_idx]:
+                        assert result[b, seq_idx] == EDGE_PAD_IDX
+
+    def test_v2_confidence_produces_remasking(self, v2_confidence_remasking,
+                                               vocab_config):
+        """v2 confidence remasking should actually remask some positions."""
+        vc = vocab_config
+        B = 10
+        x_t = torch.zeros(B, vc.seq_len, dtype=torch.long)
+        pad_mask = torch.ones(B, vc.seq_len, dtype=torch.bool)
+        for k in range(vc.n_max):
+            x_t[:, k] = k % 10
+        for pos in range(vc.n_edges):
+            x_t[:, vc.n_max + pos] = pos % 10
+
+        node_logits = torch.randn(B, vc.n_max, NODE_VOCAB_SIZE)
+        edge_logits = torch.randn(B, vc.n_edges, EDGE_VOCAB_SIZE)
+
+        total_remasked = 0
+        for i in range(50):
+            torch.manual_seed(i)
+            result = v2_confidence_remasking(
+                x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
+                node_logits=node_logits, edge_logits=edge_logits,
+            )
+            total_remasked += (result != x_t).sum().item()
+
+        assert total_remasked > 0, (
+            "v2 confidence remasking should remask some positions"
+        )
+
+
+class TestV2Factory:
+    """Factory function with rate_network parameter."""
+
+    def test_factory_with_rate_network(self, rate_net, vocab_config):
+        """Factory should create schedule with rate_network."""
+        config = {"enabled": True, "strategy": "confidence", "eta": 0.0}
+        result = create_remasking_schedule(
+            config, noise_schedule=None, vocab_config=vocab_config,
+            rate_network=rate_net,
+        )
+        assert isinstance(result, RemaskingSchedule)
+        assert result.rate_network is rate_net
+
+    def test_factory_disabled_with_rate_network(self, rate_net, vocab_config):
+        """Factory should return None when disabled even with rate_network."""
+        config = {"enabled": False, "strategy": "confidence", "eta": 0.0}
+        result = create_remasking_schedule(
+            config, noise_schedule=None, vocab_config=vocab_config,
+            rate_network=rate_net,
+        )
+        assert result is None

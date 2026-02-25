@@ -6,8 +6,8 @@
 
 
 ## Overall Status
-- Current phase: All phases complete (v1 pipeline) + post-v1 enhancements + v2 learned forward process (MELD) trained and evaluated
-- Last completed: v2 Phase 8 (Training & Evaluation)
+- Current phase: All phases complete (v1 pipeline) + post-v1 enhancements + v2 learned forward process (MELD) trained and evaluated + v2 remasking enabled
+- Last completed: v2 Remasking (per-position sigma_max from rate_network)
 - Post-v1: Confidence-based unmasking mode added to sampling (BichraiX); SUBS zero masking probabilities added to denoiser; float64 numerical stability fix (arXiv:2409.02908); ReMDM remasking (cap strategy); Evaluation upgrade (JS/TV/W1, multi-seed, denoising eval, stratified drill-down); Systematic comparison infrastructure (V2 JSON, compare.py)
 - v2 (MELD): Learned per-position forward process — rate network, STGS, per-position ELBO loss, sampling v2, train_v2.py, evaluate.py integration. Trained 500 epochs on jabiru. Evaluated with llada+top-p 0.9, 5 seeds. Results: dramatically better distribution fidelity (Edge JS 3x better), better denoising accuracy (+11-18%), but lower diversity (0.67 vs 0.95).
 - Spec corrections: vocab.py NODE_TYPES/EDGE_TYPES name-to-index mappings corrected (Phase 1 Step 0); loss_mask formula corrected (Phase 3)
@@ -575,7 +575,7 @@ work uses log-linear.
 Status: COMPLETE (22 runs; final method selection pending)
 
 ### Experiment design
-Layered experiment plan from `remasking_design.md` Section 10. All runs use
+Layered experiment plan from `remasking_design_with_fixed_forward_process.md` Section 10. All runs use
 log-linear schedule, 100 sampling steps, 1000 samples, 5 seeds.
 
 - **Layer 1**: 4 baselines (random/llada x argmax/top-p, no remasking)
@@ -802,14 +802,64 @@ Status: COMPLETE
 v2 learned rates deliver exactly what MELD promises: reduced state clashing produces a better denoiser (higher accuracy at all timesteps, better distribution match). Edge JS improved 3x to match `random_topp` levels while retaining llada's perfect validity and transitivity. However, more structured masking trajectories reduce sampling stochasticity, causing diversity/novelty regression. The model generates more accurate but less varied outputs.
 
 ### Next steps
-1. Add remasking on top of v2 (main diversity driver in v1)
+1. ~~Add remasking on top of v2 (main diversity driver in v1)~~ — DONE (see v2 Remasking below)
 2. Try `random` unmasking mode with v2
 3. Increase top-p (e.g., 0.95) to inject more sampling stochasticity
 
 ---
 
+## v2 — Remasking with Per-Position Sigma_max
+Status: COMPLETE (code + tests; evaluation pending)
+
+> Design doc: `remasking_design_with_learned_forward_process.md`
+> All changes are additive (v1 backward-compatible, v2-removable per Section 1.5 of planning doc)
+
+### Summary
+Enabled ReMDM confidence remasking for v2 learned forward process. The key
+adaptation: `sigma_max` is now per-position `(B, SEQ_LEN)` from the rate
+network instead of scalar `(B, 1)` from the noise schedule. Positions the
+rate network keeps clean longer (high alpha) get less remasking budget — a
+natural double signal alongside confidence-based redistribution.
+
+### Files modified (4 production, 2 test, 1 doc)
+- `bd_gen/diffusion/remasking.py` — `rate_network=None` kwarg in constructor + factory; v2 branch in `_compute_sigma_max` returning `(B, SEQ_LEN)`; `pad_mask` threaded to sigma computation
+- `bd_gen/diffusion/sampling.py` — Removed guard block that disabled remasking when `rate_network` provided (−7 lines); removed unused `warnings` import
+- `scripts/generate_samples.py` — Pass `rate_network` to `create_remasking_schedule()`; removed early-exit block
+- `tests/test_remasking.py` — 11 new tests: `TestV2SigmaMax` (7), `TestV2ConfidenceRemasking` (2), `TestV2Factory` (2)
+- `tests/test_sampling_v2.py` — Replaced `TestV2RemaskingWarning` with `TestV2RemaskingIntegration` (3 tests: call count, no-MASK output, PAD protection)
+- `remasking_design_with_learned_forward_process.md` — Added Section 4.10 (v1 backward-compat & reversibility)
+
+### v1 backward compatibility
+All new parameters default to `None`. Existing v1 callers are unaffected:
+- `RemaskingSchedule("cap", 0.1, noise_schedule=sched, vc)` — unchanged
+- `create_remasking_schedule(cfg, noise_schedule, vc)` — unchanged
+- `sample(..., rate_network=None)` — unchanged (guard block was never reached anyway)
+- All 42 existing v1 remasking tests pass unchanged
+
+### v2 removal checklist (if v2 abandoned)
+Delete `rate_network` kwarg from constructor + factory, remove v2 branch in
+`_compute_sigma_max`, remove `pad_mask` param. Optionally re-add guard blocks.
+
+### Test results
+- 54/54 pass (test_remasking.py + test_sampling_v2.py)
+- 598/601 full suite pass (3 pre-existing failures in test_metrics.py unrelated)
+- `ruff check` clean on all modified files
+
+### Configuration for evaluation run
+```
+method: v2_llada_topp0.9_remdm_confidence_tsw1.0
+unmasking: llada, top-p=0.9, remasking: confidence, t_switch=1.0, eta=0.0
+checkpoint: outputs/v2_2026-02-20_18-36-23/checkpoints/checkpoint_final.pt
+noise=learned, 100 steps, 1000 samples, 5 seeds
+```
+
+See `remasking_design_with_learned_forward_process.md` Section 6 for full
+evaluation commands (generation on jabiru GPU, evaluation CPU).
+
+---
+
 ## Post-v1 — Evaluation Pipeline Split (Generate vs Evaluate)
-Status: IN PROGRESS (code complete, backfill pending)
+Status: COMPLETE
 
 ### Problem
 The monolithic `evaluate.py` coupled GPU generation and CPU metric computation
@@ -845,12 +895,35 @@ step and all metrics are pure CPU.
 ```
 Storage: ~1.6 MB per method (5 seeds × 1000 × 36 tokens). 23 methods ≈ 37 MB.
 
-### Backfill needed
-The 23 existing models lack `_samples.pt` files. Each needs one final GPU run
-with `generate_samples.py`. After that, all future metric additions are instant:
+### Backfill completed (2026-02-24)
+All 35 models (23 loglinear + 12 linear) backfilled with `_samples.pt` on jabiru.
+Old monolithic `generate_and_evaluate.py` deleted. `.gitignore` updated to exclude
+`_samples.pt` files. All JSONs re-evaluated with new `inside_validity` metric.
+
+### Saved sample files on jabiru
+All `_samples.pt` files live on the jabiru GPU server (NOT in git — too large):
+```
+jabiru:/Data/amine.chraibi/Davis/BD_Generation/eval_results/loglinear/*_samples.pt  (23 files)
+jabiru:/Data/amine.chraibi/Davis/BD_Generation/eval_results/linear/*_samples.pt     (12 files)
+```
+SSH: `ssh amine.chraibi@jabiru.polytechnique.fr`
+Path: `cd /Data/amine.chraibi/Davis && source .venv/bin/activate && cd BD_Generation`
+
+### Checkpoints on jabiru
+```
+loglinear (v1): /Data/amine.chraibi/Davis/BD_Generation/outputs/2026-02-19_16-58-23/checkpoints/checkpoint_final.pt
+linear (v1):    /Data/amine.chraibi/Davis/BD_Generation/outputs/2026-02-19_15-24-27/checkpoints/checkpoint_final.pt
+v2 (MELD):      /Data/amine.chraibi/Davis/BD_Generation/outputs/v2_2026-02-20_18-36-23/checkpoints/checkpoint_final.pt
+```
+
+### Re-evaluating after adding a new metric (CPU only, no GPU needed)
 ```bash
-# One-time (GPU)
-python scripts/generate_samples.py eval.checkpoint_path=path/to/ckpt.pt
-# Any time (CPU only)
-python scripts/evaluate.py --schedule loglinear --model <method>
+# On jabiru (has _samples.pt files + venv):
+python scripts/evaluate.py --schedule loglinear --update-comparison
+python scripts/evaluate.py --schedule linear --update-comparison
+# Then copy updated JSONs + comparison.md back locally:
+scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/loglinear/*.json BD_Generation/eval_results/loglinear/
+scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/loglinear/*.md BD_Generation/eval_results/loglinear/
+scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/linear/*.json BD_Generation/eval_results/linear/
+scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/linear/*.md BD_Generation/eval_results/linear/
 ```

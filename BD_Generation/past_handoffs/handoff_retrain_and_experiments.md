@@ -15,7 +15,7 @@
 - **Updated save_utils.py**: config table includes `top_p` and `remasking_t_switch`.
 - **Updated implementation_state_T1.md**: 3 post-v1 sections marked as MISTAKE (code retained, results discarded), new "Retraining After Previously Committed Changes" section added (Status: PENDING).
 - **Created `scripts/run_experiments.sh`**: batch script for retrain + 12 eval runs + comparison table.
-- **Created `remasking_design.md`**: design document covering remasking strategies, experiment layers, top-p rationale.
+- **Created `remasking_design_with_fixed_forward_process.md`**: design document covering remasking strategies, experiment layers, top-p rationale.
 - **Tests**: 533 pass, 2 skipped (data-dependent, will unskip after experiments), 1 pre-existing warning (lr_scheduler ordering in test_integration.py — cosmetic, not blocking).
 - **Commit**: `840dfb6` — all changes in one clean commit.
 
@@ -78,7 +78,7 @@
 **Read these first (in order):**
 1. `BD_Generation/implementation_state_T1.md` — lines 507-531 for retraining section, lines 333-406 for remasking status
 2. `BD_Generation/scripts/run_experiments.sh` — the full batch script
-3. `BD_Generation/remasking_design.md` — Section 10 for experiment design rationale
+3. `BD_Generation/remasking_design_with_fixed_forward_process.md` — Section 10 for experiment design rationale
 4. `BD_Generation/configs/eval/default.yaml` — eval config with all parameters
 
 **Key implementation files (if debugging needed):**

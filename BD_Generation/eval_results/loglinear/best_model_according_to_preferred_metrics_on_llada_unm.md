@@ -1,11 +1,111 @@
 # Best Model Selection: LLaDA Unmasking — Preferred Metrics Analysis
 
-**Date:** 2026-02-20
+**Date:** 2026-02-25 (updated)
 **Scope:** LLaDA unmasking only, log-linear schedule, all remasking variants
-**Source data:** `eval_results/loglinear/comparison.md` (22 methods, 5 seeds each)
+**Source data:** `eval_results/loglinear/comparison.md` (23 methods, 5 seeds each)
 **Personal Best:** llada_topp0.9_remdm_confidence_tsw0.5
 
 LLaDA unmasking with top-p 0.9 nucleus sampling, confidence-based remasking (per-position remasking probability proportional to softmax of negative confidence, no eta parameter, budget set by noise schedule), t_switch 0.5 (remasking active only in the second half of denoising), 100 sampling steps, 1000 samples per seed across 5 seeds.
+
+---
+
+## 0. Why LLaDA Unmasking (not Random)
+
+**The inside_validity metric is the decisive factor for choosing LLaDA unmasking
+over random unmasking.** This metric checks whether generated bubble diagrams
+contain architecturally forbidden containment relationships (69 forbidden
+pairs, e.g. LivingRoom inside Bathroom). A graph fails if it has even one
+violation. RPLAN baseline: 99.78%.
+
+| Method | Inside validity |
+|--------|:--------------:|
+| llada_argmax_no_remask | **100.0%** |
+| llada_topp0.9_no_remask | **99.4%** |
+| llada + conf tsw=0.3 | 95.9% |
+| llada + cap eta=0.2 | 98.0% |
+| llada + cap eta=0.4 | 94.0% |
+| llada + conf tsw=0.5 | 93.8% |
+| llada + conf/cap (heavy) | ~93.3% |
+| random_argmax_no_remask | 94.6% |
+| **random_topp0.9_no_remask** | **84.0%** |
+| **random + cap eta=0.2** | **59.3%** |
+| **random + cap eta>=0.4** | **~57%** |
+| **random + confidence (any tsw)** | **54-56%** |
+| v2_llada_topp0.9_no_remask | 100.0% |
+
+The gap is massive: LLaDA methods stay at 93-100%, while random methods
+collapse to 54-84%. Random unmasking with remasking is particularly
+catastrophic, dropping nearly half of all generated graphs below the
+architectural validity threshold.
+
+### Why random unmasking fails on inside_validity
+
+The root cause is **unmasking order vs. semantic dependencies**.
+
+The inside_validity check enforces constraints between **pairs of room types
+and their spatial relationship** (inside/surrounding edges). To produce a
+valid containment assignment, the model needs to know the node types of both
+rooms before it assigns an inside/surrounding edge between them.
+
+**LLaDA unmasking** (confidence-based top-k) naturally resolves this:
+
+1. **High-confidence positions unmask first.** Node types and "easy" edges
+   (adjacency between common room pairs) tend to have high confidence early
+   in the denoising process, because the model has strong priors about which
+   room types appear together.
+2. **Containment edges unmask later, in context.** By the time the model
+   must decide inside/surrounding relationships, it already knows the room
+   types at both endpoints. It can then apply the learned constraints and
+   avoid forbidden pairs.
+3. **Self-correcting ordering:** even without explicit scheduling, the
+   confidence ranking acts as an implicit dependency resolver — structural
+   "anchor" tokens (node types, high-frequency edges) lock in first,
+   providing context for lower-confidence decisions.
+
+**Random unmasking** breaks this dependency ordering:
+
+1. **Inside/surrounding edges may unmask before their node types.** With
+   random coin-flips per position, an edge at position (i,j) can be
+   unmasked while node types at positions i and j are still MASK. The model
+   must then "guess" the containment relationship without knowing which
+   rooms are involved.
+2. **The model's edge prediction is dominated by marginal priors.** Without
+   node-type context, the model falls back on the marginal frequency of each
+   edge type. Since inside/surrounding edges are relatively rare (~6-8% of
+   edges in RPLAN), the model often assigns them to inappropriate room pairs.
+
+### Why remasking amplifies the problem for random unmasking
+
+Random unmasking drops from 84% (no remask) to ~55% (with remasking) — a
+**29pp collapse**. LLaDA drops from 99.4% to ~93% — only a **6pp drop**.
+
+The mechanism:
+
+- **Remasking re-masks already-decided positions** and forces re-prediction.
+  With LLaDA, the re-prediction still benefits from the confidence-based
+  scaffolding: high-confidence node types remain unmasked (they're unlikely
+  to be remasked since confidence-based remasking targets the *least*
+  confident positions), so edge re-predictions still have node-type context.
+- **With random unmasking, remasking is doubly destructive.** The random
+  unmasking order already produced some correct-by-luck containment
+  assignments. Remasking can then re-mask those edges and re-predict them in
+  a context where the surrounding node types may *also* have been remasked
+  (since remasking doesn't know about semantic dependencies either). Each
+  remasking cycle compounds the probability of forbidden-pair violations.
+- **The cap strategy makes it worse than confidence remasking** because cap
+  remasks a fixed fraction of positions uniformly, while confidence remasking
+  at least targets low-confidence positions — but with random unmasking order,
+  even confidence remasking can't salvage the broken dependency structure
+  (55-56% vs 57-59%).
+
+### Conclusion
+
+**We use LLaDA unmasking because it preserves inside_validity at >93% across
+all configurations, while random unmasking degrades to 54-84%.** This is a
+hard requirement: a model that produces architecturally impossible floorplans
+(LivingRoom inside Bathroom) in ~45% of samples is unusable regardless of
+how good its distributional metrics are. The remaining sections of this
+document compare remasking strategies *within* LLaDA unmasking only.
 
 ---
 

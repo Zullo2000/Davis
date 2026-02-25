@@ -87,7 +87,7 @@
 5. `BD_Generation/bd_gen/diffusion/noise_schedule.py` — LogLinearSchedule (lines 103-161)
 6. `BD_Generation/scripts/evaluate.py` — schedule-aware result saving (lines 531-535)
 7. `BD_Generation/scripts/compare.py` — per-schedule comparison
-8. `BD_Generation/remasking_design.md` — Section 10 for experiment design rationale
+8. `BD_Generation/remasking_design_with_fixed_forward_process.md` — Section 10 for experiment design rationale
 
 ## Context for the next session
 

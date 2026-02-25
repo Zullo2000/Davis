@@ -6,13 +6,10 @@ Covers spec Section 14.6 tests:
   37. Output shape is (B, SEQ_LEN) long
   38. rate_network=None behaves identically to v1 (backward compatible)
 
-Also tests the remasking warning when both rate_network and remasking_fn
-are provided.
+Also tests v2 + remasking integration (rate_network + remasking_fn).
 """
 
 from __future__ import annotations
-
-import warnings
 
 import pytest
 import torch
@@ -250,38 +247,101 @@ class TestV2BackwardCompat:
 # ---------------------------------------------------------------------------
 
 
-class TestV2RemaskingWarning:
-    """Warning when both rate_network and remasking_fn are provided."""
+class TestV2RemaskingIntegration:
+    """Remasking works correctly with v2 rate_network."""
 
-    def test_warns_and_disables_remasking(self, small_model, loglinear, rate_net):
-        """Providing both rate_network and remasking_fn emits a warning
-        and skips remasking (remasking_fn never called)."""
+    def test_remasking_called_with_rate_network(self, small_model, loglinear, rate_net):
+        """Providing both rate_network and remasking_fn: remasking IS called."""
         call_count = [0]
 
         def tracking_remasking(x_t, t_now, t_next, pad_mask, **kwargs):
             call_count[0] += 1
             return x_t
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            result = sample(
-                small_model, loglinear, vc,
-                batch_size=2, num_steps=5,
-                rate_network=rate_net,
-                remasking_fn=tracking_remasking,
-                fixed_num_rooms=4,
-            )
+        result = sample(
+            small_model, loglinear, vc,
+            batch_size=2, num_steps=5,
+            rate_network=rate_net,
+            remasking_fn=tracking_remasking,
+            fixed_num_rooms=4,
+        )
 
-        # Warning was emitted
-        assert any(
-            "remasking will be skipped" in str(w.message) for w in caught
-        ), "Expected warning about remasking being skipped"
-
-        # Remasking was never called
-        assert call_count[0] == 0, (
-            f"remasking_fn was called {call_count[0]} times but should be 0"
+        # Remasking called at steps where i > 0 AND t_now < t_switch (1.0).
+        # With 5 steps: i=4 (t=1.0, skipped: not < 1.0), i=3,2,1 (called),
+        # i=0 (skipped: last step). So 3 calls.
+        assert call_count[0] == 3, (
+            f"remasking_fn should be called 3 times "
+            f"but was called {call_count[0]}"
         )
 
         # Output still valid
         assert result.shape == (2, vc.seq_len)
         assert result.dtype == torch.long
+
+    def test_confidence_remasking_with_v2_no_mask(
+        self, small_model, loglinear, rate_net,
+    ):
+        """v2 + confidence remasking: no MASK tokens in output."""
+        from bd_gen.diffusion.remasking import RemaskingSchedule
+
+        remasking_fn = RemaskingSchedule(
+            strategy="confidence",
+            eta=0.0,
+            noise_schedule=None,
+            vocab_config=vc,
+            rate_network=rate_net,
+        )
+
+        result = sample(
+            small_model, loglinear, vc,
+            batch_size=4, num_steps=10,
+            unmasking_mode="llada",
+            top_p=0.9,
+            rate_network=rate_net,
+            remasking_fn=remasking_fn,
+            fixed_num_rooms=4,
+        )
+
+        assert result.shape == (4, vc.seq_len)
+        # No MASK tokens in real positions
+        pad_mask = torch.stack([vc.compute_pad_mask(4) for _ in range(4)])
+        for b in range(4):
+            for pos in range(vc.seq_len):
+                if pad_mask[b, pos]:
+                    tok = result[b, pos].item()
+                    if pos < vc.n_max:
+                        assert tok != NODE_MASK_IDX, f"MASK at node pos {pos}"
+                    else:
+                        assert tok != EDGE_MASK_IDX, f"MASK at edge pos {pos}"
+
+    def test_v2_remasking_pad_protected(self, small_model, loglinear, rate_net):
+        """v2 + remasking: PAD positions remain correct."""
+        from bd_gen.diffusion.remasking import RemaskingSchedule
+
+        remasking_fn = RemaskingSchedule(
+            strategy="confidence",
+            eta=0.0,
+            noise_schedule=None,
+            vocab_config=vc,
+            rate_network=rate_net,
+        )
+
+        num_rooms = 3
+        result = sample(
+            small_model, loglinear, vc,
+            batch_size=4, num_steps=10,
+            unmasking_mode="llada",
+            top_p=0.9,
+            rate_network=rate_net,
+            remasking_fn=remasking_fn,
+            fixed_num_rooms=num_rooms,
+        )
+
+        n_max = vc.n_max
+        # Node PAD
+        assert (result[:, num_rooms:n_max] == NODE_PAD_IDX).all()
+        # Edge PAD
+        pad_mask = vc.compute_pad_mask(num_rooms)
+        for pos in range(vc.n_edges):
+            if not pad_mask[n_max + pos]:
+                assert (result[:, n_max + pos] == EDGE_PAD_IDX).all()

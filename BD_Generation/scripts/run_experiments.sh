@@ -3,7 +3,7 @@
 # ReMDM Remasking Experiment Suite
 # =============================================================================
 #
-# Runs the full layered experiment design from remasking_design.md Section 10:
+# Runs the full layered experiment design from remasking_design_with_fixed_forward_process.md Section 10:
 #   - Retrain with post-v1 improvements (SUBS zero masking, float64 ELBO, IS)
 #   - Layer 1: 4 baselines (random/llada x argmax/top-p, no remasking)
 #   - Layer 2: 5 cap eta sweep runs (top-p=0.9, random unmasking)

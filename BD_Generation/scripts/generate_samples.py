@@ -209,13 +209,9 @@ def generate_samples(cfg: DictConfig) -> None:
     # --- Remasking schedule ---
     remasking_fn = create_remasking_schedule(
         cfg.eval.remasking, noise_schedule, vocab_config,
+        rate_network=rate_network,
     )
-    if remasking_fn is not None and is_v2:
-        logger.warning(
-            "Remasking not supported with v2 learned rates; disabling."
-        )
-        remasking_fn = None
-    elif remasking_fn is not None:
+    if remasking_fn is not None:
         logger.info(
             "Remasking enabled: strategy=%s, eta=%.3f, t_switch=%.2f",
             cfg.eval.remasking.strategy,
