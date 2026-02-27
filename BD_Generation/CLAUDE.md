@@ -1,17 +1,24 @@
 # BD_Generation — Agent Rules
 
+current_static_spec = BD_Generation\planning_T1_guidance.md
+current_dynamic_file = BD_Generation\implementation_state_T1_guidance.md
+
 ## Session startup
-- At the start of each session, read `BD_Generation/implementation_state_T1.md` or BD_Generation\planning_T1_with_learned_forward_process.md to understand current state.
-- Refer to `BD_Generation/planning_T1_with_fixed_forward_process.md` as the implementation spec (source of truth for what to build).
+- At the start of each session, read current_dynamic_file to understand current state.
+- Refer to current_static_spec as the implementation spec (source of truth for what to build).
 - Only read the last `BD_Generation/handoff<last>.md` generated if the user explicitly asks you to resume from a handoff.
 
 ## Spec and state files
-- `planning_T1_with_fixed_forward_process.md` or BD_Generation\planning_T1_with_learned_forward_process.md is the STATIC spec. Only update it for spec bugs. 
-- `implementation_state_T1.md` is the DYNAMIC state. Update it after each phase with a compact summary.
+- current_static_spec is the STATIC spec. Only update it for spec bugs. 
+- current_dynamic_file is the DYNAMIC state. Update it after each phase with a compact summary.
+
+## effect of progress on old code
+- if the implementation of a new model or a new module (ex: guidance) requires fundamental changes in the code always ask the permission emphasizing where they occur and their motivation and the pros and cons of those changes
+
 
 ## Phase workflow
 - Only mark a Phase as "COMPLETE" when the user explicitly tells you to. Until the previous phase is COMPLETE you cannot proceed to the next one.
-- Parallelize with sub-agents the workstreams within a single phase as described in `planning_T1_with_fixed_forward_process.md`, but NOT across phases. Only in this implementation because it is the first one and we prioritize comprehension over velocity.
+- Parallelize with sub-agents the workstreams within a single phase as described in current_static_spec
 - Create a documentation `.md` file in `docs/` for each new module.
 
 ## Git conventions

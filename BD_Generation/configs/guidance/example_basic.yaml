@@ -1,0 +1,23 @@
+# Example: basic architectural constraints for guided generation.
+# Kitchen=1, LivingRoom=1, Kitchen adjacent to LivingRoom, no Bathroom-Kitchen.
+constraints:
+  - type: ExactCount
+    name: one_kitchen
+    room_type: Kitchen
+    target: 1
+  - type: ExactCount
+    name: one_living
+    room_type: LivingRoom
+    target: 1
+  - type: RequireAdj
+    name: kitchen_near_living
+    type_a: Kitchen
+    type_b: LivingRoom
+  - type: ForbidAdj
+    name: no_bath_kitchen
+    type_a: Bathroom
+    type_b: Kitchen
+num_candidates: 8
+alpha: 1.0
+phi: linear
+reward_mode: soft

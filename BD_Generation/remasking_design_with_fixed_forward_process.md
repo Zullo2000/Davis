@@ -501,7 +501,7 @@ Data already collected; just compare metrics.
 > **Date:** 2026-02-20 (updated with tsw=1.0 runs)
 > **Schedule:** Log-linear (with importance sampling)
 > **Total runs:** 22 (4 baselines + 9 random remasking + 9 llada remasking)
-> **Full data:** `eval_results/loglinear/comparison.md` (auto-generated, all 22 methods)
+> **Full data:** `eval_results/loglinear_noise_sc/comparison.md` (auto-generated, all 22 methods)
 
 ### 11.1 What we ran
 

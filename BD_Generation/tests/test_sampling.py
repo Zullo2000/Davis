@@ -278,30 +278,12 @@ class TestPadPreservation:
 
 
 # =========================================================================
-# Guidance and Inpainting Hooks
+# Inpainting and Remasking Hooks
 # =========================================================================
 
 
-class TestGuidanceAndInpainting:
+class TestInpaintingAndRemasking:
     """Verify pluggable hooks work correctly."""
-
-    def test_guidance_fn_called(
-        self, dummy_model, linear_schedule, vocab_config
-    ):
-        """A guidance_fn that tracks calls is invoked num_steps times."""
-        call_count = [0]
-
-        def tracking_guidance(logits_tuple, x_t, t, pad_mask):
-            call_count[0] += 1
-            return logits_tuple
-
-        num_steps = 7
-        sample(
-            dummy_model, linear_schedule, vocab_config,
-            batch_size=2, num_steps=num_steps, fixed_num_rooms=4,
-            guidance_fn=tracking_guidance,
-        )
-        assert call_count[0] == num_steps
 
     def test_fixed_tokens_preserved(
         self, dummy_model, linear_schedule, vocab_config

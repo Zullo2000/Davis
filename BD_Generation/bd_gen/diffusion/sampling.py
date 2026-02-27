@@ -5,8 +5,8 @@ tokens. At each step, the model predicts logits for masked positions,
 and tokens are stochastically or deterministically unmasked based on the
 schedule's unmasking probability.
 
-Supports pluggable guidance functions, fixed tokens for inpainting, and
-an optional remasking function for ReMDM-style inference.
+Supports fixed tokens for inpainting and an optional remasking function
+for ReMDM-style inference.
 """
 
 from __future__ import annotations
@@ -116,6 +116,166 @@ def _clamp_pad(
     return x_t
 
 
+def _single_step_unmask(
+    x_t: Tensor,
+    node_logits: Tensor,
+    edge_logits: Tensor,
+    pad_mask: Tensor,
+    p_unmask: Tensor,
+    i: int,
+    num_steps: int,
+    n_max: int,
+    top_p: float | None,
+    temperature: float,
+    unmasking_mode: str,
+    device: torch.device,
+    fixed_tokens: Tensor | None,
+    fixed_mask: Tensor | None,
+) -> Tensor:
+    """Perform token selection, unmasking, PAD clamping, and inpainting.
+
+    Corresponds to steps 4c–4h of the sampling loop.  The model call is
+    NOT included — logits are passed in.  No remasking is applied.
+
+    Args:
+        x_t: (B, SEQ_LEN) current tokens.
+        node_logits: (B, n_max, NODE_VOCAB_SIZE) model predictions.
+        edge_logits: (B, n_edges, EDGE_VOCAB_SIZE) model predictions.
+        pad_mask: (B, SEQ_LEN) bool, True=real.
+        p_unmask: (B, 1) or (B, SEQ_LEN) unmasking probability.
+        i: Current step index (counting down from num_steps-1 to 0).
+        num_steps: Total number of denoising steps N.
+        n_max: Number of node positions.
+        top_p: Nucleus sampling threshold, or None.
+        temperature: Sampling temperature (ignored when top_p is set).
+        unmasking_mode: "random" or "llada".
+        device: Torch device.
+        fixed_tokens: Optional (B, SEQ_LEN) inpainting tokens.
+        fixed_mask: Optional (B, SEQ_LEN) bool inpainting mask.
+
+    Returns:
+        (B, SEQ_LEN) updated token tensor.
+    """
+    batch_size = x_t.shape[0]
+    seq_len = x_t.shape[1]
+
+    # 4c. Choose predicted tokens
+    if top_p is not None and top_p < 1.0:
+        node_pred = _top_p_sample(node_logits, top_p)
+        edge_pred = _top_p_sample(edge_logits, top_p)
+    elif temperature == 0.0:
+        node_pred = node_logits.argmax(dim=-1)
+        edge_pred = edge_logits.argmax(dim=-1)
+    else:
+        node_gumbel = _gumbel_sample(node_logits, temperature, device)
+        edge_gumbel = _gumbel_sample(edge_logits, temperature, device)
+        node_pred = node_gumbel.argmax(dim=-1)
+        edge_pred = edge_gumbel.argmax(dim=-1)
+
+    pred_tokens = torch.cat([node_pred, edge_pred], dim=1)
+
+    # 4d. Identify currently masked positions
+    is_node_mask = x_t[:, :n_max] == NODE_MASK_IDX
+    is_edge_mask = x_t[:, n_max:] == EDGE_MASK_IDX
+    is_mask = torch.cat([is_node_mask, is_edge_mask], dim=1)
+
+    # 4e. Decide which MASK positions to unmask
+    if unmasking_mode == "random":
+        unmask_rand = torch.rand(batch_size, seq_len, device=device)
+        should_unmask = (unmask_rand < p_unmask) & is_mask
+    elif unmasking_mode == "llada":
+        node_probs = F.softmax(node_logits, dim=-1)
+        edge_probs = F.softmax(edge_logits, dim=-1)
+        node_conf = node_probs.gather(
+            -1, node_pred.unsqueeze(-1)
+        ).squeeze(-1)
+        edge_conf = edge_probs.gather(
+            -1, edge_pred.unsqueeze(-1)
+        ).squeeze(-1)
+        confidence = torch.cat([node_conf, edge_conf], dim=1)
+
+        confidence = torch.where(
+            is_mask, confidence,
+            torch.tensor(-float("inf"), device=device),
+        )
+
+        num_masked = is_mask.sum(dim=1)
+        if p_unmask.shape[-1] > 1:
+            # Per-position (v2): sum p_unmask over masked positions
+            budget = (p_unmask * is_mask.float()).sum(dim=1)
+            num_to_unmask = budget.round().long().clamp(min=1)
+        else:
+            num_to_unmask = (
+                (p_unmask.squeeze(1) * num_masked.float())
+                .round().long().clamp(min=1)
+            )
+
+        if i == 0:
+            should_unmask = is_mask
+        else:
+            should_unmask = torch.zeros_like(is_mask)
+            for b in range(batch_size):
+                k = int(min(num_to_unmask[b].item(), num_masked[b].item()))
+                if k > 0:
+                    _, topk_idx = torch.topk(confidence[b], k)
+                    should_unmask[b, topk_idx] = True
+    else:
+        raise ValueError(
+            f"Unknown unmasking_mode: {unmasking_mode!r}. "
+            "Use 'random' or 'llada'."
+        )
+
+    # 4f. Update x_t
+    x_t = torch.where(should_unmask, pred_tokens, x_t)
+
+    # 4g. Clamp PAD positions
+    x_t = _clamp_pad(x_t, pad_mask, n_max)
+
+    # 4h. Apply fixed_tokens for inpainting
+    if fixed_tokens is not None and fixed_mask is not None:
+        x_t = torch.where(fixed_mask, fixed_tokens.to(device), x_t)
+
+    return x_t
+
+
+def _single_step_remask(
+    x_t: Tensor,
+    remasking_fn: Callable | None,
+    t_now: float,
+    t_next: float,
+    t_switch: float,
+    i: int,
+    pad_mask: Tensor,
+    node_logits: Tensor,
+    edge_logits: Tensor,
+) -> Tensor:
+    """Apply remasking if applicable (step 4i).
+
+    No-op if ``remasking_fn`` is None, or if the step/switch conditions
+    are not met (i == 0 or t_now >= t_switch).
+
+    Args:
+        x_t: (B, SEQ_LEN) current tokens.
+        remasking_fn: Optional callable for ReMDM remasking.
+        t_now: Current timestep.
+        t_next: Next timestep.
+        t_switch: Timestep threshold for activating remasking.
+        i: Current step index.
+        pad_mask: (B, SEQ_LEN) bool.
+        node_logits: (B, n_max, NODE_VOCAB_SIZE) model predictions.
+        edge_logits: (B, n_edges, EDGE_VOCAB_SIZE) model predictions.
+
+    Returns:
+        (B, SEQ_LEN) possibly remasked token tensor.
+    """
+    if remasking_fn is not None and i > 0 and t_now < t_switch:
+        x_t = remasking_fn(
+            x_t, t_now, t_next, pad_mask,
+            node_logits=node_logits, edge_logits=edge_logits,
+        )
+    return x_t
+
+
 @torch.no_grad()
 def sample(
     model: torch.nn.Module,
@@ -127,7 +287,6 @@ def sample(
     top_p: float | None = None,
     unmasking_mode: str = "random",
     t_switch: float = 1.0,
-    guidance_fn: Callable | None = None,
     fixed_tokens: Tensor | None = None,
     fixed_mask: Tensor | None = None,
     remasking_fn: Callable | None = None,
@@ -160,9 +319,6 @@ def sample(
             is only applied when t_now < t_switch. Default 1.0 means
             remasking at all steps (backward compatible). Lower values
             delay remasking until later in denoising (ReMDM-Switch).
-        guidance_fn: Optional callable that receives
-            ``((node_logits, edge_logits), x_t, t_scalar, pad_mask)``
-            and returns a modified ``(node_logits, edge_logits)`` tuple.
         fixed_tokens: (B, SEQ_LEN) long tensor of tokens to keep fixed
             (for inpainting). Used together with fixed_mask.
         fixed_mask: (B, SEQ_LEN) bool tensor. True = position is fixed
@@ -235,13 +391,7 @@ def sample(
         # 4a. Get model predictions
         node_logits, edge_logits = model(x_t, pad_mask, t_tensor)
 
-        # 4b. Apply guidance if provided
-        if guidance_fn is not None:
-            node_logits, edge_logits = guidance_fn(
-                (node_logits, edge_logits), x_t, t_now, pad_mask
-            )
-
-        # 4c. Compute unmasking probability
+        # 4b. Compute unmasking probability
         if rate_network is not None:
             # v2 path: per-position alpha from rate_network
             alpha_now_64 = rate_network(t_tensor, pad_mask).double()  # (B, SEQ_LEN)
@@ -267,102 +417,24 @@ def sample(
             p_unmask = torch.clamp(p_unmask, min=0.0, max=1.0).float()
             p_unmask = p_unmask.unsqueeze(1)  # (B, 1) for broadcasting
 
-        # 4d. Choose predicted tokens (needed before unmasking decision
-        #     for confidence mode)
-        if top_p is not None and top_p < 1.0:
-            node_pred = _top_p_sample(node_logits, top_p)  # (B, n_max)
-            edge_pred = _top_p_sample(edge_logits, top_p)  # (B, n_edges)
-        elif temperature == 0.0:
-            node_pred = node_logits.argmax(dim=-1)  # (B, n_max)
-            edge_pred = edge_logits.argmax(dim=-1)  # (B, n_edges)
-        else:
-            node_gumbel = _gumbel_sample(node_logits, temperature, device)
-            edge_gumbel = _gumbel_sample(edge_logits, temperature, device)
-            node_pred = node_gumbel.argmax(dim=-1)
-            edge_pred = edge_gumbel.argmax(dim=-1)
+        # 4c-4h. Token selection + unmasking + PAD clamp + inpainting
+        x_t = _single_step_unmask(
+            x_t, node_logits, edge_logits, pad_mask, p_unmask,
+            i, num_steps, n_max, top_p, temperature, unmasking_mode,
+            torch.device(device), fixed_tokens, fixed_mask,
+        )
 
-        pred_tokens = torch.cat([node_pred, edge_pred], dim=1)  # (B, SEQ_LEN)
-
-        # 4e. Identify currently masked positions
-        is_node_mask = x_t[:, :n_max] == NODE_MASK_IDX  # (B, n_max)
-        is_edge_mask = x_t[:, n_max:] == EDGE_MASK_IDX  # (B, n_edges)
-        is_mask = torch.cat([is_node_mask, is_edge_mask], dim=1)  # (B, SEQ_LEN)
-
-        # 4f. Decide which MASK positions to unmask
-        if unmasking_mode == "random":
-            unmask_rand = torch.rand(batch_size, seq_len, device=device)
-            should_unmask = (unmask_rand < p_unmask) & is_mask
-        elif unmasking_mode == "llada":
-            # Per-position confidence = P(predicted token)
-            node_probs = F.softmax(node_logits, dim=-1)
-            edge_probs = F.softmax(edge_logits, dim=-1)
-            node_conf = node_probs.gather(
-                -1, node_pred.unsqueeze(-1)
-            ).squeeze(-1)  # (B, n_max)
-            edge_conf = edge_probs.gather(
-                -1, edge_pred.unsqueeze(-1)
-            ).squeeze(-1)  # (B, n_edges)
-            confidence = torch.cat([node_conf, edge_conf], dim=1)
-
-            # Non-mask positions → -inf (never selected)
-            confidence = torch.where(
-                is_mask, confidence,
-                torch.tensor(-float("inf"), device=device),
-            )
-
-            # Budget: fraction of remaining masked tokens
-            num_masked = is_mask.sum(dim=1)  # (B,)
-            if rate_network is not None:
-                # Per-position: sum p_unmask over masked positions per sample
-                budget = (p_unmask * is_mask.float()).sum(dim=1)  # (B,)
-                num_to_unmask = budget.round().long().clamp(min=1)
-            else:
-                num_to_unmask = (
-                    (p_unmask.squeeze(1) * num_masked.float())
-                    .round().long().clamp(min=1)
-                )
-
-            if i == 0:
-                # Last step: unmask everything remaining
-                should_unmask = is_mask
-            else:
-                # TODO: vectorize this per-sample loop for performance
-                should_unmask = torch.zeros_like(is_mask)
-                for b in range(batch_size):
-                    k = int(min(num_to_unmask[b].item(), num_masked[b].item()))
-                    if k > 0:
-                        _, topk_idx = torch.topk(confidence[b], k)
-                        should_unmask[b, topk_idx] = True
-        else:
-            raise ValueError(
-                f"Unknown unmasking_mode: {unmasking_mode!r}. "
-                "Use 'random' or 'llada'."
-            )
-
-        # 4g. Update x_t: unmask selected positions, keep rest
-        x_t = torch.where(should_unmask, pred_tokens, x_t)
-
-        # 4h. Clamp PAD positions
-        x_t = _clamp_pad(x_t, pad_mask, n_max)
-
-        # 4i. Apply fixed_tokens for inpainting
-        if fixed_tokens is not None and fixed_mask is not None:
-            x_t = torch.where(fixed_mask, fixed_tokens.to(device), x_t)
-
-        # 4j. Apply remasking if provided (ReMDM)
-        # Skip at last step (i=0): must finalize all tokens.
-        # Skip if t_now >= t_switch (ReMDM-Switch: remask only late in denoising).
-        if remasking_fn is not None and i > 0 and t_now < t_switch:
-            x_t = remasking_fn(
-                x_t, t_now, t_next, pad_mask,
-                node_logits=node_logits, edge_logits=edge_logits,
-            )
+        # 4i. Apply remasking if provided (ReMDM)
+        x_t = _single_step_remask(
+            x_t, remasking_fn, t_now, t_next, t_switch, i,
+            pad_mask, node_logits, edge_logits,
+        )
 
     # --- Step 5: Final cleanup (safety net) ---
     # With SUBS zero masking probabilities enforced in the denoiser (MASK/PAD
     # logits clamped to -inf), this step should be a no-op in practice.
-    # Kept as defense-in-depth for edge cases (e.g., guidance_fn or
-    # remasking_fn introducing MASK tokens after the last denoising step).
+    # Kept as defense-in-depth for edge cases (e.g., remasking_fn
+    # introducing MASK tokens after the last denoising step).
     # Any remaining MASK tokens -> predict at t ~ 0
     remaining_node_mask = x_t[:, :n_max] == NODE_MASK_IDX
     remaining_edge_mask = x_t[:, n_max:] == EDGE_MASK_IDX

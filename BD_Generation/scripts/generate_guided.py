@@ -1,17 +1,25 @@
-"""Generate and save sample tokens for later metric evaluation (GPU).
+"""Generate constrained samples using SVDD-style guided sampling (GPU).
 
-Loads model checkpoint, generates tokens for each seed, and saves them
-to ``eval_results/{schedule_noise_sc}/{method}_samples.pt``.  No metrics are
-computed — use ``evaluate.py`` for that.
+Loads model checkpoint, constraint config, and optionally calibration data,
+then generates guided samples for each seed and saves them alongside
+``GuidanceStats`` diagnostics.
 
 Usage::
 
-    python scripts/generate_samples.py eval.checkpoint_path=path/to/ckpt.pt
-    python scripts/generate_samples.py eval.checkpoint_path=... eval.num_samples=500
+    python scripts/generate_guided.py \
+        eval.checkpoint_path=path/to/ckpt.pt \
+        --guidance-config configs/guidance/example_basic.yaml
+
+    python scripts/generate_guided.py \
+        eval.checkpoint_path=path/to/ckpt.pt \
+        --guidance-config configs/guidance/example_basic.yaml \
+        --alpha 0.5 --K 16
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import logging
 import sys
 from pathlib import Path
@@ -33,7 +41,9 @@ from bd_gen.data.vocab import NODE_PAD_IDX, VocabConfig  # noqa: E402
 from bd_gen.diffusion.noise_schedule import LogLinearSchedule, get_noise  # noqa: E402
 from bd_gen.diffusion.rate_network import RateNetwork  # noqa: E402
 from bd_gen.diffusion.remasking import create_remasking_schedule  # noqa: E402
-from bd_gen.diffusion.sampling import sample  # noqa: E402
+from bd_gen.guidance.constraint_schema import load_guidance_config  # noqa: E402
+from bd_gen.guidance.guided_sampler import guided_sample  # noqa: E402
+from bd_gen.guidance.reward import RewardComposer  # noqa: E402
 from bd_gen.model.denoiser import BDDenoiser  # noqa: E402
 from bd_gen.utils.checkpoint import load_checkpoint  # noqa: E402
 from bd_gen.utils.seed import set_seed  # noqa: E402
@@ -46,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Helpers (extracted from generate_and_evaluate.py)
+# Helpers (shared with generate_samples.py)
 # ---------------------------------------------------------------------------
 
 
@@ -104,8 +114,14 @@ def _load_v2_checkpoint(
         return None
 
 
-def _build_method_name(cfg: DictConfig, is_v2: bool) -> str:
-    """Build systematic method name: {unmasking}_{sampling}_{remasking}."""
+def _build_method_name(
+    cfg: DictConfig,
+    is_v2: bool,
+    guidance_tag: str,
+    K: int,
+    alpha: float,
+) -> str:
+    """Build method name: {unmasking}_{sampling}_guided_{tag}_K{K}_a{alpha}."""
     remasking_cfg = cfg.eval.remasking
     unmasking_mode = cfg.eval.get("unmasking_mode", "random")
     top_p = cfg.eval.get("top_p", None)
@@ -129,37 +145,53 @@ def _build_method_name(cfg: DictConfig, is_v2: bool) -> str:
     else:
         remask_tag = "no_remask"
 
-    method_name = f"{unmask_tag}_{sampling_tag}_{remask_tag}"
+    method_name = (
+        f"{unmask_tag}_{sampling_tag}_{remask_tag}"
+        f"_guided_{guidance_tag}_K{K}_a{alpha}"
+    )
     if is_v2:
         method_name = f"v2_{method_name}"
     return method_name
 
 
-def _build_config_dict(cfg: DictConfig, ckpt_path: Path, is_v2: bool) -> dict:
-    """Build config metadata dict stored alongside samples."""
-    remasking_cfg = cfg.eval.remasking
-    top_p = cfg.eval.get("top_p", None)
-    return {
-        "seeds": list(cfg.eval.get("seeds", [cfg.seed])),
-        "num_samples": cfg.eval.num_samples,
-        "sampling_steps": cfg.eval.sampling_steps,
-        "temperature": cfg.eval.temperature,
-        "top_p": top_p,
-        "unmasking_mode": cfg.eval.get("unmasking_mode", "random"),
-        "remasking_enabled": remasking_cfg.enabled,
-        "remasking_strategy": (
-            remasking_cfg.strategy if remasking_cfg.enabled else None
-        ),
-        "remasking_eta": (
-            remasking_cfg.eta if remasking_cfg.enabled else None
-        ),
-        "remasking_t_switch": (
-            remasking_cfg.get("t_switch", 1.0) if remasking_cfg.enabled
-            else None
-        ),
-        "checkpoint": str(ckpt_path.name),
-        "is_v2": is_v2,
-    }
+# ---------------------------------------------------------------------------
+# CLI argument parsing
+# ---------------------------------------------------------------------------
+
+
+def _parse_guidance_args() -> tuple[argparse.Namespace, list[str]]:
+    """Parse guidance-specific CLI args; pass remaining to Hydra."""
+    parser = argparse.ArgumentParser(
+        description="Generate guided samples with SVDD reweighting.",
+        add_help=False,
+    )
+    parser.add_argument(
+        "--guidance-config", type=str, required=True,
+        help="Path to guidance constraint YAML/JSON.",
+    )
+    parser.add_argument(
+        "--alpha", type=float, default=None,
+        help="Override guidance alpha (temperature). Default: from config.",
+    )
+    parser.add_argument(
+        "--K", type=int, default=None,
+        help="Override number of candidates K. Default: from config.",
+    )
+    parser.add_argument(
+        "--guidance-tag", type=str, default="basic",
+        help="Short tag for method name (default: 'basic').",
+    )
+    parser.add_argument(
+        "--reward-mode", type=str, default=None, choices=["soft", "hard"],
+        help="Override reward mode (soft/hard). Default: from config.",
+    )
+    parser.add_argument(
+        "--calibration", type=str, default=None,
+        help="Override calibration JSON path. Default: from config.",
+    )
+
+    guidance_args, remaining = parser.parse_known_args()
+    return guidance_args, remaining
 
 
 # ---------------------------------------------------------------------------
@@ -167,10 +199,51 @@ def _build_config_dict(cfg: DictConfig, ckpt_path: Path, is_v2: bool) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def generate_samples(cfg: DictConfig) -> None:
-    """Generate and save sample tokens for all seeds."""
+def generate_guided_samples(
+    cfg: DictConfig,
+    guidance_args: argparse.Namespace,
+) -> None:
+    """Generate and save guided samples for all seeds."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info("Device: %s", device)
+
+    # --- Load guidance config ---
+    guidance_config_path = Path(guidance_args.guidance_config)
+    if not guidance_config_path.is_absolute():
+        guidance_config_path = _PROJECT_ROOT / guidance_config_path
+    guidance_config = load_guidance_config(guidance_config_path)
+    logger.info("Guidance config: %s", guidance_config_path)
+
+    # CLI overrides
+    K = guidance_args.K or guidance_config.num_candidates
+    alpha = guidance_args.alpha or guidance_config.alpha
+    reward_mode = guidance_args.reward_mode or guidance_config.reward_mode
+
+    logger.info(
+        "Guidance: K=%d, alpha=%.2f, phi=%s, reward_mode=%s, %d constraints",
+        K, alpha, guidance_config.phi, reward_mode,
+        len(guidance_config.constraints),
+    )
+
+    # --- Compile constraints and build RewardComposer ---
+    from bd_gen.guidance.constraint_schema import compile_constraints
+    constraints = compile_constraints(guidance_config)
+    composer = RewardComposer(
+        constraints=constraints,
+        phi=guidance_config.phi,
+        reward_mode=reward_mode,
+    )
+
+    # --- Load calibration if specified (CLI --calibration overrides YAML) ---
+    cal_source = guidance_args.calibration or guidance_config.calibration_file
+    if cal_source is not None:
+        cal_path = Path(cal_source)
+        if not cal_path.is_absolute():
+            cal_path = _PROJECT_ROOT / cal_path
+        with open(cal_path) as f:
+            calibration = json.load(f)
+        composer.load_calibration(calibration)
+        logger.info("Calibration loaded: %s", cal_path)
 
     # --- Check checkpoint path ---
     ckpt_path = cfg.eval.checkpoint_path
@@ -234,23 +307,28 @@ def generate_samples(cfg: DictConfig) -> None:
     )
     num_rooms_dist = train_ds.num_rooms_distribution
 
-    # --- Generate samples for each seed ---
+    # --- Generate guided samples for each seed ---
     seeds = list(cfg.eval.get("seeds", [cfg.seed]))
     num_samples = cfg.eval.num_samples
     batch_size = cfg.eval.batch_size
     unmasking_mode = cfg.eval.get("unmasking_mode", "random")
 
     logger.info(
-        "Generating %d samples x %d seeds (%s)",
+        "Generating %d guided samples x %d seeds (%s)",
         num_samples, len(seeds), ", ".join(str(s) for s in seeds),
     )
 
-    per_seed_data: dict[str, dict[str, torch.Tensor]] = {}
+    per_seed_data: dict[str, dict] = {}
+    per_seed_stats: dict[str, dict] = {}
+
     for seed in seeds:
         logger.info("--- Seed %d ---", seed)
         set_seed(seed)
 
         all_tokens = []
+        all_stats_steps: list[list] = []
+        all_stats_per_sample: list[list] = []
+
         with torch.no_grad():
             for start in tqdm(
                 range(0, num_samples, batch_size),
@@ -258,12 +336,15 @@ def generate_samples(cfg: DictConfig) -> None:
                 leave=False,
             ):
                 bs = min(batch_size, num_samples - start)
-                batch_tokens = sample(
+                batch_tokens, batch_stats = guided_sample(
                     model=model,
                     noise_schedule=noise_schedule,
                     vocab_config=vocab_config,
+                    reward_composer=composer,
                     batch_size=bs,
                     num_steps=cfg.eval.sampling_steps,
+                    num_candidates=K,
+                    guidance_alpha=alpha,
                     temperature=cfg.eval.temperature,
                     top_p=cfg.eval.get("top_p", None),
                     unmasking_mode=unmasking_mode,
@@ -274,18 +355,37 @@ def generate_samples(cfg: DictConfig) -> None:
                     device=device,
                 )
                 all_tokens.append(batch_tokens.cpu())
+                all_stats_steps.append(batch_stats.steps)
+                # Store per-sample stats (tensors moved to CPU) for
+                # distribution plots and per-sample trajectory analysis.
+                all_stats_per_sample.append([
+                    {
+                        k: v.cpu() if isinstance(v, torch.Tensor) else (
+                            {vk: vv.cpu() for vk, vv in v.items()}
+                            if isinstance(v, dict) else v
+                        )
+                        for k, v in step.items()
+                    }
+                    for step in batch_stats.steps_per_sample
+                ])
 
         tokens = torch.cat(all_tokens, dim=0)
         pad_masks = _reconstruct_pad_masks(tokens, vocab_config)
         logger.info(
-            "  Generated %d samples, shape %s",
+            "  Generated %d guided samples, shape %s",
             tokens.size(0), list(tokens.shape),
         )
 
         per_seed_data[str(seed)] = {"tokens": tokens, "pad_masks": pad_masks}
+        per_seed_stats[str(seed)] = {
+            "batch_stats": all_stats_steps,
+            "batch_stats_per_sample": all_stats_per_sample,
+        }
 
     # --- Save ---
-    method_name = _build_method_name(cfg, is_v2)
+    method_name = _build_method_name(
+        cfg, is_v2, guidance_args.guidance_tag, K, alpha,
+    )
     schedule_tag = f"{cfg.noise.type}_noise_sc"
     eval_results_dir = _PROJECT_ROOT / "eval_results" / schedule_tag
     eval_results_dir.mkdir(parents=True, exist_ok=True)
@@ -297,8 +397,26 @@ def generate_samples(cfg: DictConfig) -> None:
         "n_max": cfg.data.n_max,
         "seeds": seeds,
         "num_samples": num_samples,
-        "config": _build_config_dict(cfg, ckpt_path, is_v2),
+        "config": {
+            "seeds": seeds,
+            "num_samples": num_samples,
+            "sampling_steps": cfg.eval.sampling_steps,
+            "temperature": cfg.eval.temperature,
+            "top_p": cfg.eval.get("top_p", None),
+            "unmasking_mode": unmasking_mode,
+            "remasking_enabled": cfg.eval.remasking.enabled,
+            "checkpoint": str(ckpt_path.name),
+            "is_v2": is_v2,
+            # Guidance-specific
+            "guidance_config": str(guidance_config_path),
+            "num_candidates": K,
+            "guidance_alpha": alpha,
+            "phi": guidance_config.phi,
+            "reward_mode": reward_mode,
+            "num_constraints": len(constraints),
+        },
         "per_seed": per_seed_data,
+        "guidance_stats": per_seed_stats,
     }
     torch.save(payload, samples_path)
     size_mb = samples_path.stat().st_size / 1e6
@@ -312,6 +430,6 @@ def generate_samples(cfg: DictConfig) -> None:
 
 
 if __name__ == "__main__":
-    cli_overrides = sys.argv[1:]
-    config = _load_config(cli_overrides)
-    generate_samples(config)
+    guidance_args, hydra_overrides = _parse_guidance_args()
+    config = _load_config(hydra_overrides)
+    generate_guided_samples(config, guidance_args)

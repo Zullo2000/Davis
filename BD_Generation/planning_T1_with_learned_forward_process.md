@@ -1220,3 +1220,53 @@ v2 without remasking already beats v1's best remasking configuration on distribu
 2. **Try `random` unmasking mode with v2** — in v1, random unmasking had the best diversity (1.0) and distribution match. Combined with v2's better denoiser, random unmasking may produce a strong balance of accuracy and variety.
 
 3. **Increase top-p** (e.g., 0.95 or 1.0) — higher nucleus sampling threshold injects more stochasticity at token selection time, which may compensate for the reduced trajectory-level stochasticity from learned rates.
+
+---
+
+## 17. v2 + Remasking Results (confidence tsw=1.0)
+
+**Date:** 2026-02-25
+**Config:** llada + top-p 0.9 + confidence remasking (tsw=1.0, eta=0.0), 100 steps, 1000 samples, 5 seeds.
+**Checkpoint:** same as Section 16 (`v2_2026-02-20_18-36-23/checkpoint_final.pt`).
+
+Remasking was the primary diversity driver in v1 (archetypes: 29 → 121). After adapting `RemaskingSchedule` to support per-position `sigma_max` from the rate network (Section 9.5 scope, now implemented), we evaluated v2 with the same remasking configuration that won the v1 22-run experiment.
+
+### 17.1 Results: v2 no-remask vs v2 + remasking vs v1 + remasking
+
+| Metric | v2 no remask | v2 + remasking | v1 + remasking (tsw=1.0) |
+|---|:---:|:---:|:---:|
+| **Inside validity** | 100.0% | **99.5 +/- 0.2%** | 93.3 +/- 0.5% |
+| **Edge JS** | 0.035 | **0.044 +/- 0.002** | 0.204 +/- 0.003 |
+| **Node TV** | 0.054 | **0.059 +/- 0.002** | 0.199 +/- 0.005 |
+| **Cond. edge TV (wt)** | 0.441 | **0.432 +/- 0.008** | 0.571 +/- 0.008 |
+| **Type-cond degree TV (wt)** | 0.178 | 0.180 +/- 0.005 | 0.169 +/- 0.005 |
+| Spatial transitivity | 100.0% | **100.0 +/- 0.1%** | 98.7 +/- 0.4% |
+| Mode coverage (wt) | 78.3% | **82.0 +/- 0.7%** | 73.3 +/- 2.3% |
+| Novelty | 0.864 | 0.861 +/- 0.007 | **0.999 +/- 0.001** |
+| Diversity | 0.671 | **0.836 +/- 0.012** | **0.982 +/- 0.005** |
+| Unique archetypes | 26.0 | **40.0 +/- 4.4** | **120.8 +/- 4.7** |
+| MMD-Degree | 0.104 | **0.069 +/- 0.003** | 0.035 +/- 0.004 |
+| MMD-Clustering | 0.090 | **0.059 +/- 0.005** | 0.028 +/- 0.002 |
+
+### 17.2 What remasking achieved on v2
+
+Remasking improved v2's diversity metrics without significantly degrading quality:
+
+- **Diversity**: 0.671 → 0.836 (+25%). Substantial improvement, but still below v1's 0.982.
+- **Archetypes**: 26 → 40 (+54%). Still below the design doc's success threshold of 80 and v1's 121.
+- **Mode coverage (wt)**: 78.3% → 82.0% (+3.7pp). Now the highest of any llada-based method.
+- **MMD-Degree/Clustering**: Improved ~33-34%, moving toward v1 levels.
+- **Inside validity**: Only 0.5pp drop (100.0% → 99.5%), far less than v1's 6.6pp drop (99.9% → 93.3%).
+- **Cond. edge TV**: Actually *improved* from 0.441 to 0.432 (remasking helped edge fidelity, unusual).
+- **Spatial transitivity**: Unchanged at 100.0%.
+
+### 17.3 Interpretation
+
+**v2 + remasking occupies a distinct Pareto point.** It is the best method on distributional fidelity (edge JS, node TV, cond. edge TV) and inside validity among all remasked methods, while having moderate diversity. The v1 + remasking method remains superior for diversity (121 vs 40 archetypes).
+
+**Remasking has diminished effect on v2 vs v1.** In v1, remasking increased archetypes from 29 to 121 (4.2x). In v2, it increased from 26 to 40 (1.5x). The learned forward process produces more deterministic sampling trajectories that resist the stochastic perturbation from remasking. The rate network's structured per-position masking schedule means remasked positions tend to be re-predicted similarly, limiting diversity gains.
+
+**The quality-diversity frontier:**
+- **Best quality**: v2 + remasking (edge JS 0.044, inside validity 99.5%, cond. edge TV 0.432)
+- **Best diversity**: v1 + remasking (121 archetypes, 0.982 diversity, 73.3% mode coverage)
+- **Best balance**: depends on application — if inside validity > 95% is a hard requirement, v2 + remasking is the only remasked method that achieves it

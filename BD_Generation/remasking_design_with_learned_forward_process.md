@@ -485,33 +485,26 @@ python scripts/generate_samples.py \
     eval.remasking.t_switch=1.0
 ```
 
-Output: `eval_results/learned/v2_llada_topp0.9_remdm_confidence_tsw1.0_samples.pt`
-
-**Directory note:** `noise=learned` causes `schedule_tag = "learned"`, so
-samples land in `eval_results/learned/`. For comparison table compatibility
-(all 23 existing methods are in `loglinear/`), manually move or symlink the
-`_samples.pt` file to `eval_results/loglinear/` before running `evaluate.py`.
-Same procedure used for the v2 baseline (`implementation_state_T1.md`, v2
-Phase 8 issues).
+Output: `eval_results/learned_noise_sc/v2_llada_topp0.9_remdm_confidence_tsw1.0_samples.pt`
 
 ### 6.2 Evaluation (CPU, jabiru or local)
 
 ```bash
 python scripts/evaluate.py \
-    --schedule loglinear \
+    --schedule learned_noise_sc \
     --model v2_llada_topp0.9_remdm_confidence_tsw1.0 \
     --update-comparison
 ```
 
 Output:
-- `eval_results/loglinear/v2_llada_topp0.9_remdm_confidence_tsw1.0.json`
-- Updated `eval_results/loglinear/comparison.md` (now 24 methods)
+- `eval_results/learned_noise_sc/v2_llada_topp0.9_remdm_confidence_tsw1.0.json`
+- Updated `eval_results/learned_noise_sc/comparison.md`
 
 ### 6.3 Copy results locally
 
 ```bash
-scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/loglinear/v2_*.json BD_Generation/eval_results/loglinear/
-scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/loglinear/comparison.md BD_Generation/eval_results/loglinear/
+scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/learned_noise_sc/v2_*.json BD_Generation/eval_results/learned_noise_sc/
+scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/learned_noise_sc/comparison.md BD_Generation/eval_results/learned_noise_sc/
 ```
 
 ### 6.4 Comparison targets

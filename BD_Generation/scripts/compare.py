@@ -1,10 +1,10 @@
 """Generate comparison markdown from evaluation result JSONs.
 
 Usage:
-    python scripts/compare.py --schedule linear
-    python scripts/compare.py --schedule loglinear
-    python scripts/compare.py --results eval_results/linear/foo.json eval_results/linear/bar.json
-    python scripts/compare.py --schedule linear --primary-only
+    python scripts/compare.py --schedule linear_noise_sc
+    python scripts/compare.py --schedule loglinear_noise_sc
+    python scripts/compare.py --results eval_results/linear_noise_sc/foo.json eval_results/linear_noise_sc/bar.json
+    python scripts/compare.py --schedule linear_noise_sc --primary-only
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def main() -> None:
         "--schedule",
         type=str,
         default=None,
-        help="Noise schedule subdirectory (e.g., 'linear', 'loglinear'). "
+        help="Noise schedule subdirectory (e.g., 'linear_noise_sc', 'loglinear_noise_sc', 'learned_noise_sc'). "
         "Auto-discovers *.json in eval_results/<schedule>/.",
     )
     parser.add_argument(

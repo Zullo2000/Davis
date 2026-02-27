@@ -562,7 +562,7 @@ work uses log-linear.
 - Config: `configs/noise/loglinear.yaml` (type: loglinear, eps: 1e-3)
 - 11 new tests (544 total pass)
 - Eval/compare scripts parameterized by `--schedule` argument
-- Results: `eval_results/linear/` and `eval_results/loglinear/` (12 JSON + comparison.md each)
+- Results: `eval_results/linear_noise_sc/`, `eval_results/loglinear_noise_sc/`, `eval_results/learned_noise_sc/`
 
 ### Training config (both runs)
 - 500 epochs, lr=3e-4, AdamW, grad_clip=1.0, importance_sampling=true
@@ -585,7 +585,7 @@ log-linear schedule, 100 sampling steps, 1000 samples, 5 seeds.
 - **Run 10**: skipped (argmax mode-collapses with llada; top-p synergy already demonstrated)
 
 Total: 22 runs (4 baselines + 9 random remasking + 9 llada remasking).
-Completed: 22/22. Full results: `eval_results/loglinear/comparison.md` (auto-generated, 22 methods).
+Completed: 22/22. Full results: `eval_results/loglinear_noise_sc/comparison.md` (auto-generated, 22 methods).
 
 ### Layer 1 results — llada vs random baselines (log-linear)
 
@@ -772,7 +772,7 @@ Status: COMPLETE
 **Config:** 500 epochs, lr=3e-4, AdamW, grad_clip=1.0, uniform t, Gumbel temp 1.0→0.1 linear decay, lambda_edge=1.0
 
 **Evaluation:** llada + top-p 0.9, 100 steps, 1000 samples, 5 seeds [42, 123, 456, 789, 1337], no remasking.
-**Results file:** `eval_results/loglinear/v2_llada_topp0.9_no_remask.json`
+**Results file:** `eval_results/learned_noise_sc/v2_llada_topp0.9_no_remask.json`
 
 ### v2 Results vs v1 (primary comparison: llada_topp0.9_no_remask)
 
@@ -796,7 +796,7 @@ Status: COMPLETE
 
 ### Issues resolved
 - Boolean indexing bug in `forward_mask_learned()`: `gumbel_weights[~pad_mask, 0]` interpreted as two separate index args on 3D tensor. Fixed by boolean-masking to (N_pad, 2) slice, then assigning `[1.0, 0.0]`. (Commit `729ea6c`)
-- Eval results saved to `eval_results/linear/` instead of `loglinear/` due to v2 noise type being "learned" — manually placed in `loglinear/` for comparison.
+- Eval results now in `eval_results/learned_noise_sc/` (previously placed in `loglinear/` for comparison).
 
 ### Interpretation
 v2 learned rates deliver exactly what MELD promises: reduced state clashing produces a better denoiser (higher accuracy at all timesteps, better distribution match). Edge JS improved 3x to match `random_topp` levels while retaining llada's perfect validity and transitivity. However, more structured masking trajectories reduce sampling stochasticity, causing diversity/novelty regression. The model generates more accurate but less varied outputs.
@@ -903,8 +903,9 @@ Old monolithic `generate_and_evaluate.py` deleted. `.gitignore` updated to exclu
 ### Saved sample files on jabiru
 All `_samples.pt` files live on the jabiru GPU server (NOT in git — too large):
 ```
-jabiru:/Data/amine.chraibi/Davis/BD_Generation/eval_results/loglinear/*_samples.pt  (23 files)
-jabiru:/Data/amine.chraibi/Davis/BD_Generation/eval_results/linear/*_samples.pt     (12 files)
+jabiru:/Data/amine.chraibi/Davis/BD_Generation/eval_results/loglinear_noise_sc/*_samples.pt  (21 files)
+jabiru:/Data/amine.chraibi/Davis/BD_Generation/eval_results/linear_noise_sc/*_samples.pt   (12 files)
+jabiru:/Data/amine.chraibi/Davis/BD_Generation/eval_results/learned_noise_sc/*_samples.pt  (2 files)
 ```
 SSH: `ssh amine.chraibi@jabiru.polytechnique.fr`
 Path: `cd /Data/amine.chraibi/Davis && source .venv/bin/activate && cd BD_Generation`
@@ -919,11 +920,14 @@ v2 (MELD):      /Data/amine.chraibi/Davis/BD_Generation/outputs/v2_2026-02-20_18
 ### Re-evaluating after adding a new metric (CPU only, no GPU needed)
 ```bash
 # On jabiru (has _samples.pt files + venv):
-python scripts/evaluate.py --schedule loglinear --update-comparison
-python scripts/evaluate.py --schedule linear --update-comparison
+python scripts/evaluate.py --schedule loglinear_noise_sc --update-comparison
+python scripts/evaluate.py --schedule linear_noise_sc --update-comparison
+python scripts/evaluate.py --schedule learned_noise_sc --update-comparison
 # Then copy updated JSONs + comparison.md back locally:
-scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/loglinear/*.json BD_Generation/eval_results/loglinear/
-scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/loglinear/*.md BD_Generation/eval_results/loglinear/
-scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/linear/*.json BD_Generation/eval_results/linear/
-scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/linear/*.md BD_Generation/eval_results/linear/
+scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/loglinear_noise_sc/*.json BD_Generation/eval_results/loglinear_noise_sc/
+scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/loglinear_noise_sc/*.md BD_Generation/eval_results/loglinear_noise_sc/
+scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/linear_noise_sc/*.json BD_Generation/eval_results/linear_noise_sc/
+scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/linear_noise_sc/*.md BD_Generation/eval_results/linear_noise_sc/
+scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/learned_noise_sc/*.json BD_Generation/eval_results/learned_noise_sc/
+scp amine.chraibi@jabiru.polytechnique.fr:/Data/amine.chraibi/Davis/BD_Generation/eval_results/learned_noise_sc/*.md BD_Generation/eval_results/learned_noise_sc/
 ```

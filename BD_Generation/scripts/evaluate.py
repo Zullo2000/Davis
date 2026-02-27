@@ -6,16 +6,21 @@ detokenizes, computes all metrics, and saves/updates ``{method}.json``.
 Usage::
 
     # Evaluate one model
-    python scripts/evaluate.py --schedule loglinear --model llada_argmax_no_remask
+    python scripts/evaluate.py --schedule loglinear_noise_sc --model llada_argmax_no_remask
 
     # Evaluate all models with saved samples
-    python scripts/evaluate.py --schedule loglinear
+    python scripts/evaluate.py --schedule loglinear_noise_sc
 
     # List models with/without saved samples
-    python scripts/evaluate.py --schedule loglinear --list
+    python scripts/evaluate.py --schedule loglinear_noise_sc --list
 
     # Also regenerate comparison.md
-    python scripts/evaluate.py --schedule loglinear --update-comparison
+    python scripts/evaluate.py --schedule loglinear_noise_sc --update-comparison
+
+    # Evaluate with constraint satisfaction metrics
+    python scripts/evaluate.py --schedule loglinear_noise_sc \
+        --model llada_topp0.9_no_remask \
+        --guidance-config configs/guidance/example_basic.yaml
 """
 
 from __future__ import annotations
@@ -54,6 +59,11 @@ from bd_gen.eval.metrics import (  # noqa: E402
     validity_rate,
 )
 from bd_gen.eval.validity import check_validity_batch  # noqa: E402
+from bd_gen.guidance.constraints import Constraint  # noqa: E402
+from bd_gen.guidance.constraint_schema import (  # noqa: E402
+    compile_constraints,
+    load_guidance_config,
+)
 from eval_results.save_utils import (  # noqa: E402
     aggregate_multi_seed,
     build_comparison_table,
@@ -80,11 +90,15 @@ def compute_all_metrics(
     train_dicts: list[dict],
     n_max: int,
     conditional_topN_pairs: int | None = 20,
+    constraints: list[Constraint] | None = None,
 ) -> dict:
     """Compute all metrics from tokens + pad_masks.
 
     This is a pure-CPU function.  It detokenizes, runs validity checks,
     and computes every metric unconditionally.
+
+    When ``constraints`` is provided, additionally computes per-constraint
+    satisfaction metrics (satisfaction rate, mean violation, violation histogram).
 
     Returns a flat dict of metric_name -> float (or nested dicts for
     stratified metrics).
@@ -164,6 +178,85 @@ def compute_all_metrics(
         graph_dicts,
     )
 
+    # --- Constraint satisfaction metrics (when constraints provided) ---
+    if constraints:
+        metrics.update(
+            compute_constraint_metrics(graph_dicts, constraints),
+        )
+
+    return metrics
+
+
+def compute_constraint_metrics(
+    graph_dicts: list[dict],
+    constraints: list[Constraint],
+) -> dict:
+    """Compute per-constraint satisfaction metrics on decoded graphs.
+
+    Returns flat dict with keys:
+        - ``constraint/satisfaction_{name}``: fraction with hard_violation == 0
+        - ``constraint/satisfaction_overall``: fraction where ALL constraints satisfied
+        - ``constraint/mean_violation_{name}``: mean hard violation (all samples)
+        - ``constraint/mean_violation_when_failed_{name}``: mean violation | violation > 0
+        - ``constraint/violation_histogram_{name}``: {0: count, 1: count, 2: count, "3+": count}
+    """
+    n = len(graph_dicts)
+    if n == 0:
+        return {}
+
+    metrics: dict = {}
+
+    # Per-constraint violations: {name: [violation_per_sample]}
+    all_violations: dict[str, list[float]] = {}
+    for constraint in constraints:
+        violations = []
+        for gd in graph_dicts:
+            result = constraint.hard_violation(gd)
+            violations.append(result.violation)
+        all_violations[constraint.name] = violations
+
+    # Per-constraint metrics
+    for constraint in constraints:
+        name = constraint.name
+        violations = all_violations[name]
+
+        # Satisfaction rate
+        satisfied_count = sum(1 for v in violations if v == 0.0)
+        metrics[f"constraint/satisfaction_{name}"] = satisfied_count / n
+
+        # Mean violation (all samples)
+        metrics[f"constraint/mean_violation_{name}"] = sum(violations) / n
+
+        # Mean violation when failed
+        failed = [v for v in violations if v > 0.0]
+        if failed:
+            metrics[f"constraint/mean_violation_when_failed_{name}"] = (
+                sum(failed) / len(failed)
+            )
+        else:
+            metrics[f"constraint/mean_violation_when_failed_{name}"] = 0.0
+
+        # Violation histogram: bins 0, 1, 2, 3+
+        hist: dict[str, int] = {"0": 0, "1": 0, "2": 0, "3+": 0}
+        for v in violations:
+            iv = int(v)
+            if iv == 0:
+                hist["0"] += 1
+            elif iv == 1:
+                hist["1"] += 1
+            elif iv == 2:
+                hist["2"] += 1
+            else:
+                hist["3+"] += 1
+        metrics[f"constraint/violation_histogram_{name}"] = hist
+
+    # Overall satisfaction: all constraints satisfied simultaneously
+    all_satisfied_count = 0
+    for i in range(n):
+        if all(all_violations[c.name][i] == 0.0 for c in constraints):
+            all_satisfied_count += 1
+    metrics["constraint/satisfaction_overall"] = all_satisfied_count / n
+
     return metrics
 
 
@@ -178,11 +271,15 @@ def evaluate_method(
     train_dicts: list[dict],
     n_max: int = 8,
     conditional_topN_pairs: int | None = 20,
+    constraints: list[Constraint] | None = None,
 ) -> dict[str, dict[str, float]]:
     """Evaluate a single method from saved sample tensors.
 
     Loads the ``_samples.pt``, runs all metrics per seed, aggregates,
     and writes/updates the corresponding ``.json`` result file.
+
+    When ``constraints`` is provided, additionally computes per-constraint
+    satisfaction metrics alongside the standard generation metrics.
 
     Returns the summary dict.
     """
@@ -215,7 +312,7 @@ def evaluate_method(
 
         metrics = compute_all_metrics(
             tokens, pad_masks, vocab_config, train_dicts,
-            n_max, conditional_topN_pairs,
+            n_max, conditional_topN_pairs, constraints,
         )
         per_seed_results[int(seed)] = metrics
 
@@ -292,7 +389,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--schedule", type=str, required=True,
-        help="Noise schedule subdirectory (e.g., 'loglinear', 'linear').",
+        help="Noise schedule subdirectory (e.g., 'loglinear_noise_sc', 'linear_noise_sc', 'learned_noise_sc').",
     )
     parser.add_argument(
         "--model", type=str, default=None,
@@ -313,6 +410,11 @@ def main() -> None:
     parser.add_argument(
         "--conditional-topn", type=int, default=20,
         help="Top-N pairs for conditional metrics (default: 20).",
+    )
+    parser.add_argument(
+        "--guidance-config", type=str, default=None,
+        help="Path to guidance constraint YAML/JSON. When provided, "
+             "adds constraint satisfaction metrics to the evaluation.",
     )
     args = parser.parse_args()
 
@@ -362,6 +464,18 @@ def main() -> None:
     # Load training data (one-time)
     train_dicts = load_train_dicts(n_max=args.n_max)
 
+    # Load constraints if guidance config provided
+    constraints: list[Constraint] | None = None
+    if args.guidance_config:
+        gc_path = Path(args.guidance_config)
+        if not gc_path.is_absolute():
+            gc_path = _PROJECT_ROOT / gc_path
+        guidance_config = load_guidance_config(gc_path)
+        constraints = compile_constraints(guidance_config)
+        logger.info(
+            "Loaded %d constraints from %s", len(constraints), gc_path,
+        )
+
     # Evaluate each target
     for method_name, samples_pt in sorted(targets.items()):
         logger.info("Evaluating: %s", method_name)
@@ -371,6 +485,7 @@ def main() -> None:
             train_dicts=train_dicts,
             n_max=args.n_max,
             conditional_topN_pairs=args.conditional_topn,
+            constraints=constraints,
         )
 
     # Optionally regenerate comparison table

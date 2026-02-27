@@ -1,16 +1,16 @@
 """Compare a selected subset of models on all metrics.
 
 Usage:
-    python scripts/compare_selected.py --schedule loglinear \
-        --models llada_topp0.9_remdm_confidence_tsw0.5 v2_llada_topp0.9_no_remask
+    python scripts/compare_selected.py --schedule loglinear_noise_sc \
+        --models llada_topp0.9_remdm_confidence_tsw0.5 llada_topp0.9_no_remask
 
-    python scripts/compare_selected.py --schedule loglinear \
-        --models llada_topp0.9_no_remask \
-        random_topp0.9_no_remask v2_llada_topp0.9_no_remask \
+    python scripts/compare_selected.py --schedule learned_noise_sc \
+        --models v2_llada_topp0.9_no_remask \
+        v2_llada_topp0.9_remdm_confidence_tsw1.0 \
         --primary-only
 
     # List available models for a schedule:
-    python scripts/compare_selected.py --schedule loglinear --list
+    python scripts/compare_selected.py --schedule loglinear_noise_sc --list
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ def main() -> None:
         "--schedule",
         type=str,
         required=True,
-        help="Noise schedule subdirectory (e.g., 'linear', 'loglinear').",
+        help="Noise schedule subdirectory (e.g., 'linear_noise_sc', 'loglinear_noise_sc', 'learned_noise_sc').",
     )
     parser.add_argument(
         "--models",
@@ -59,6 +59,12 @@ def main() -> None:
         "--primary-only",
         action="store_true",
         help="Only show primary metrics (JS/TV/W1), hide KL diagnostics.",
+    )
+    parser.add_argument(
+        "--guided",
+        action="store_true",
+        help="Use focused metric families for guidance experiments "
+             "(Validity + Coverage + Priority Metrics).",
     )
     args = parser.parse_args()
 
@@ -93,7 +99,9 @@ def main() -> None:
     for p in result_paths:
         print(f"  - {p.stem}")
 
-    md = build_comparison_table(result_paths, primary_only=args.primary_only)
+    md = build_comparison_table(
+        result_paths, primary_only=args.primary_only, guided=args.guided,
+    )
 
     if args.output:
         Path(args.output).write_text(md)

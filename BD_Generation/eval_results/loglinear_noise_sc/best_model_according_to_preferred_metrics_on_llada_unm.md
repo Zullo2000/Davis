@@ -2,7 +2,7 @@
 
 **Date:** 2026-02-25 (updated)
 **Scope:** LLaDA unmasking only, log-linear schedule, all remasking variants
-**Source data:** `eval_results/loglinear/comparison.md` (23 methods, 5 seeds each)
+**Source data:** `eval_results/loglinear_noise_sc/comparison.md` (24 methods, 5 seeds each)
 **Personal Best:** llada_topp0.9_remdm_confidence_tsw0.5
 
 LLaDA unmasking with top-p 0.9 nucleus sampling, confidence-based remasking (per-position remasking probability proportional to softmax of negative confidence, no eta parameter, budget set by noise schedule), t_switch 0.5 (remasking active only in the second half of denoising), 100 sampling steps, 1000 samples per seed across 5 seeds.
@@ -32,6 +32,7 @@ violation. RPLAN baseline: 99.78%.
 | **random + cap eta>=0.4** | **~57%** |
 | **random + confidence (any tsw)** | **54-56%** |
 | v2_llada_topp0.9_no_remask | 100.0% |
+| v2_llada + conf tsw=1.0 | **99.5%** |
 
 The gap is massive: LLaDA methods stay at 93-100%, while random methods
 collapse to 54-84%. Random unmasking with remasking is particularly
@@ -360,3 +361,87 @@ Rankings essentially identical. **JS redundant.**
 **Report TV only for cond. edge, type-cond. degree, and node metrics.** JS
 carries the same information in all three cases and can be dropped from the
 preferred metrics set without losing signal.
+
+---
+
+## 8. v2 (Learned Forward Process) + Remasking
+
+**Date:** 2026-02-25
+**Config:** v2 denoiser with per-position learned rates (MELD), llada + top-p 0.9 + confidence remasking (tsw=1.0, eta=0.0).
+
+After adapting `RemaskingSchedule` to support per-position `sigma_max` from
+the rate network, we evaluated v2 with the same configuration recommended in
+Section 6 (confidence tsw=1.0). The table below compares against the v1
+methods on the preferred metrics.
+
+### Preferred metrics comparison
+
+| Metric | v1 no remask | v1 conf tsw=1.0 | v2 no remask | **v2 + conf tsw=1.0** |
+|---|:---:|:---:|:---:|:---:|
+| Inside validity | 99.4% | 93.3% | 100.0% | **99.5%** |
+| Novelty x Mode cov (wt) | 0.678 | 0.732 | 0.677 | **0.707** |
+| Spatial transitivity | 99.9% | 98.7% | 100.0% | **100.0%** |
+| Cond. edge TV (wt) | 0.472 | 0.571 | 0.441 | **0.432** |
+| Type-cond degree TV (wt) | 0.159 | 0.169 | 0.178 | 0.180 |
+| Node TV | 0.119 | 0.199 | 0.054 | **0.059** |
+
+**Metric-by-metric assessment:**
+
+1. **Novelty x Mode coverage (wt):** v2+remasking scores 0.707 (novelty
+   0.861 x mode cov 82.0%). This falls between v1 no-remask (0.678) and
+   v1+remasking (0.732). The novelty penalty (0.861 vs 0.999 for v1
+   remasking) outweighs the mode coverage gain (82.0% vs 73.3%). v1
+   conf tsw=1.0 remains the winner on this metric.
+
+2. **Spatial transitivity:** v2+remasking achieves 100.0% — perfect, matching
+   v2 no-remask and beating all v1 remasking methods (98.2-98.7%). The
+   learned forward process produces graphs with no spatial ordering cycles
+   even after remasking perturbation. **v2+remasking wins.**
+
+3. **Cond. edge TV (wt):** v2+remasking achieves 0.432 — the best of any
+   method, including the v1 no-remask baseline (0.472). Remasking on v2
+   actually *improved* conditional edge fidelity (0.441 → 0.432), the
+   opposite of v1 where remasking degraded it (0.472 → 0.571). This
+   suggests the v2 denoiser's stronger per-position predictions are
+   robust to remasking perturbation. **v2+remasking wins.**
+
+4. **Type-cond degree TV (wt):** v2+remasking scores 0.180, slightly worse
+   than v1 no-remask (0.159) and v1+remasking (0.169). The spread is small
+   (0.021 from best to worst) but consistent. **v1 conf tsw=1.0 wins.**
+
+5. **Node TV:** v2+remasking achieves 0.059, far better than any v1 method
+   (best v1: 0.119 no-remask, 0.199 with remasking). The learned forward
+   process produces near-perfect room type distributions even after
+   remasking. **v2+remasking wins.**
+
+6. **Inside validity (decisive):** v2+remasking achieves 99.5%, the highest
+   of any remasked method by a wide margin. For context: v1+remasking
+   achieves 93.3%, already the best among v1 remasking variants. v2+remasking
+   is only 0.5pp below the v2 no-remask baseline (100.0%). **v2+remasking
+   wins decisively.**
+
+### Summary
+
+v2+remasking wins on 4 of 5 preferred metrics (spatial transitivity, cond.
+edge TV, node TV, inside validity) and loses on 1 (novelty x mode coverage).
+The metric it loses on is the diversity-focused one — v2's learned forward
+process produces more deterministic trajectories that limit diversity (40
+unique archetypes vs v1's 121).
+
+### Updated recommendation
+
+The choice between v1 and v2 remasking depends on application priority:
+
+- **If inside validity is a hard constraint (>95%):** Use **v2 + conf
+  tsw=1.0**. It is the only remasked method that stays above 99%, with
+  best-in-class distributional fidelity. The diversity tradeoff (40 vs 121
+  archetypes) is acceptable if sample quality matters more than variety.
+
+- **If maximum diversity is the goal:** Use **v1 + conf tsw=1.0**. It
+  produces 3x more unique archetypes (121 vs 40) with near-perfect novelty
+  (0.999), at the cost of 93.3% inside validity and significantly worse
+  distributional fidelity.
+
+- **If balance is needed:** No single method dominates both. v2+remasking
+  occupies a distinct Pareto point: best quality, moderate diversity.
+  v1+remasking occupies the other: best diversity, moderate quality.

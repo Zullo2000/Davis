@@ -1,0 +1,6 @@
+# Default guidance hyperparameters (no constraints — override with your own).
+constraints: []
+num_candidates: 8
+alpha: 1.0
+phi: linear
+reward_mode: soft

@@ -79,6 +79,21 @@ METRIC_FAMILIES: list[tuple[str, list[tuple[str, str, bool, bool]]]] = [
     ("Conditional", _CONDITIONAL_METRICS),
 ]
 
+# Focused metric set for guided experiments: Validity + Coverage + priority metrics
+_PRIORITY_METRICS: list[tuple[str, str, bool, bool]] = [
+    ("eval/mode_coverage_weighted", "Mode coverage (weighted)", True, False),
+    ("eval/transitivity_score", "Spatial transitivity", True, False),
+    ("eval/conditional_edge_tv_weighted", "Cond. edge TV (weighted)", False, False),
+    ("eval/degree_tv_per_type_weighted", "Type-cond. degree TV (weighted)", False, False),
+    ("eval/node_tv", "Node TV", False, False),
+]
+
+GUIDED_METRIC_FAMILIES: list[tuple[str, list[tuple[str, str, bool, bool]]]] = [
+    ("Validity", _VALIDITY_METRICS),
+    ("Coverage", _COVERAGE_METRICS),
+    ("Priority Metrics", _PRIORITY_METRICS),
+]
+
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
@@ -338,6 +353,114 @@ def _build_metric_table(
     return rows
 
 
+def _build_constraint_table(
+    results: list[dict],
+    method_names: list[str],
+) -> list[str]:
+    """Build markdown table for constraint satisfaction metrics.
+
+    Dynamically detects ``constraint/*`` keys from summary dicts.
+    Skips histogram keys (non-scalar).
+    """
+    # Collect all constraint keys across results (skip histograms)
+    all_keys: set[str] = set()
+    for r in results:
+        for k in r.get("summary", {}):
+            if k.startswith("constraint/") and "histogram" not in k:
+                all_keys.add(k)
+
+    if not all_keys:
+        return []
+
+    # Sort: overall first, then satisfaction, then mean_violation, then mean_violation_when_failed
+    def _sort_key(k: str) -> tuple[int, str]:
+        if "overall" in k:
+            return (0, k)
+        if "satisfaction" in k:
+            return (1, k)
+        if "mean_violation_when_failed" in k:
+            return (3, k)
+        if "mean_violation" in k:
+            return (2, k)
+        return (4, k)
+
+    sorted_keys = sorted(all_keys, key=_sort_key)
+
+    # Build display names
+    def _display_name(k: str) -> str:
+        # "constraint/satisfaction_one_kitchen" -> "Satisfaction: one_kitchen"
+        suffix = k.replace("constraint/", "")
+        if suffix == "satisfaction_overall":
+            return "**Satisfaction (all)**"
+        if suffix.startswith("satisfaction_"):
+            name = suffix.replace("satisfaction_", "")
+            return f"Satisfaction: {name}"
+        if suffix.startswith("mean_violation_when_failed_"):
+            name = suffix.replace("mean_violation_when_failed_", "")
+            return f"Mean viol. (failed): {name}"
+        if suffix.startswith("mean_violation_"):
+            name = suffix.replace("mean_violation_", "")
+            return f"Mean violation: {name}"
+        return suffix
+
+    # Determine which keys are percentages (satisfaction rates)
+    is_pct = {k: "satisfaction" in k for k in sorted_keys}
+
+    # Build table using _build_metric_table's logic (inline for dynamic keys)
+    two_method = len(results) == 2
+    if two_method:
+        header = f"| Metric | {method_names[0]} | {method_names[1]} | Delta |"
+        sep = "|--------|:---:|:---:|:---:|"
+    else:
+        header = "| Metric | " + " | ".join(method_names) + " |"
+        sep = "|--------|" + "|".join([":---:"] * len(results)) + "|"
+
+    rows = [header, sep]
+
+    for key in sorted_keys:
+        display = _display_name(key)
+        pct = is_pct[key]
+        vals: list[str] = []
+        raw_means: list[float | None] = []
+        for r in results:
+            entry = r["summary"].get(key)
+            if entry is None:
+                vals.append("--")
+                raw_means.append(None)
+            else:
+                mean = entry["mean"]
+                std = entry["std"]
+                vals.append(
+                    _format_mean_std(mean, std, is_percentage=pct),
+                )
+                raw_means.append(mean)
+
+        if all(v == "--" for v in vals):
+            continue
+
+        if two_method:
+            m0, m1 = raw_means[0], raw_means[1]
+            if m0 is not None and m1 is not None:
+                delta = m1 - m0
+                sign = "+" if delta >= 0 else ""
+                if pct:
+                    delta_str = f"{sign}{100 * delta:.1f}%"
+                else:
+                    delta_str = f"{sign}{delta:.4f}"
+            else:
+                delta_str = "--"
+            rows.append(
+                f"| {display} | {vals[0]} | {vals[1]} | {delta_str} |",
+            )
+        else:
+            rows.append(f"| {display} | " + " | ".join(vals) + " |")
+
+    if len(rows) <= 2:
+        return []
+
+    return rows
+
+
 def _build_denoising_table(
     results: list[dict],
     method_names: list[str],
@@ -397,6 +520,12 @@ def _build_config_table(
         ("remasking_eta", "Remasking eta"),
         ("remasking_t_switch", "Remasking t_switch"),
         ("checkpoint", "Checkpoint"),
+        # Guidance-specific (present only for guided models)
+        ("num_candidates", "Guidance K"),
+        ("guidance_alpha", "Guidance alpha"),
+        ("reward_mode", "Reward mode"),
+        ("phi", "Phi function"),
+        ("num_constraints", "Num constraints"),
     ]
 
     header = "| Parameter | " + " | ".join(method_names) + " |"
@@ -426,6 +555,7 @@ def build_comparison_table(
     result_paths: list[str | Path],
     *,
     primary_only: bool = False,
+    guided: bool = False,
 ) -> str:
     """Build structured markdown comparison from evaluation result JSONs.
 
@@ -436,6 +566,8 @@ def build_comparison_table(
     Args:
         result_paths: Paths to JSON result files (V1 or V2).
         primary_only: If True, hide KL diagnostic metrics.
+        guided: If True, use focused metric families for guidance experiments
+            (Validity + Coverage + Priority Metrics instead of the full set).
 
     Returns:
         Full markdown document.
@@ -446,6 +578,8 @@ def build_comparison_table(
 
     method_names = [r["method"] for r in results]
     has_v1 = any(r.get("_upgraded_from_v1") for r in results)
+
+    families = GUIDED_METRIC_FAMILIES if guided else METRIC_FAMILIES
 
     lines: list[str] = []
 
@@ -463,7 +597,7 @@ def build_comparison_table(
     lines.append("")
 
     # --- Metric family sections ---
-    for family_title, family_spec in METRIC_FAMILIES:
+    for family_title, family_spec in families:
         table_lines = _build_metric_table(
             results, method_names, family_spec, primary_only=primary_only,
         )
@@ -472,6 +606,14 @@ def build_comparison_table(
             lines.append("")
             lines.extend(table_lines)
             lines.append("")
+
+    # --- Constraint satisfaction (dynamic, only if any result has constraint metrics) ---
+    constraint_lines = _build_constraint_table(results, method_names)
+    if constraint_lines:
+        lines.append("## Constraint Satisfaction")
+        lines.append("")
+        lines.extend(constraint_lines)
+        lines.append("")
 
     # --- Denoising (model quality) ---
     denoise_lines = _build_denoising_table(results, method_names)
