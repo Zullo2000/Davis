@@ -359,18 +359,21 @@ def guided_sample(
             p_unmask = p_unmask.unsqueeze(1)  # (B, 1)
 
         # 4c. Expand to K*B candidates
-        x_t_expanded = x_t.repeat_interleave(K, dim=0)  # (K*B, SEQ)
-        node_logits_expanded = node_logits.repeat_interleave(K, dim=0)
-        edge_logits_expanded = edge_logits.repeat_interleave(K, dim=0)
-        pad_expanded = pad_mask.repeat_interleave(K, dim=0)
-        p_expanded = p_unmask.repeat_interleave(K, dim=0)
+        # Use repeat (not repeat_interleave) so that .view(K, B, SEQ)
+        # correctly maps candidates[k, b] = k-th proposal for batch b.
+        # repeat gives: [b0, b1, ..., bB-1, b0, b1, ..., bB-1, ...] (K copies)
+        x_t_expanded = x_t.repeat(K, 1)  # (K*B, SEQ)
+        node_logits_expanded = node_logits.repeat(K, 1, 1)
+        edge_logits_expanded = edge_logits.repeat(K, 1, 1)
+        pad_expanded = pad_mask.repeat(K, 1)
+        p_expanded = p_unmask.repeat(K, 1)
 
         # Expand inpainting tensors if present
         fixed_tokens_exp = (
-            fixed_tokens.repeat_interleave(K, dim=0) if fixed_tokens is not None else None
+            fixed_tokens.repeat(K, 1) if fixed_tokens is not None else None
         )
         fixed_mask_exp = (
-            fixed_mask.repeat_interleave(K, dim=0) if fixed_mask is not None else None
+            fixed_mask.repeat(K, 1) if fixed_mask is not None else None
         )
 
         # 4d. Unmask K*B candidates (no remasking)

@@ -240,6 +240,18 @@ These are used for:
 
 Existing samples **cannot** substitute for guided generation — SVDD reweighting steers at every denoising step, producing fundamentally different outputs.
 
+### Jabiru directory migration (2026-02-27)
+
+Eval result directories were renamed locally (`loglinear/` → `loglinear_noise_sc/`, `linear/` → `linear_noise_sc/`). On jabiru, `_samples.pt` files are gitignored and were not tracked by git, so they stayed in the old `loglinear/` directory. During sync we ran:
+```bash
+mv eval_results/loglinear/*_samples.pt eval_results/loglinear_noise_sc/
+```
+The `linear/` samples need the same treatment if not already moved:
+```bash
+mv eval_results/linear/*_samples.pt eval_results/linear_noise_sc/
+```
+After confirming all `_samples.pt` files are in the `*_noise_sc/` directories, the old empty directories can be deleted.
+
 ### Jabiru reference
 
 SSH: `ssh amine.chraibi@jabiru.polytechnique.fr`
