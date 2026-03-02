@@ -6,15 +6,15 @@
 # Round 2 experiment: finer α grid + K=24, using the revised 4-constraint set
 # (one_kitchen, kitchen_near_living, no_bath_kitchen, between_2_and_3_bathrooms).
 #
-# Grid: α ∈ {0.01, 0.05, 0.1, 0.15, 0.2, 0.3} × K ∈ {16, 24} = 12 runs
+# Grid: α ∈ {0.01, 0.05, 0.15, 0.3} × K ∈ {16, 24} = 8 runs
 # Variant: v1 loglinear, llada, top-p=0.9, no remasking
 # Reward mode: soft
 #
 # Usage:
 #   cd BD_Generation
 #   bash scripts/run_g5_pilot.sh calibrate    # Step 1: calibrate (CPU, ~30s)
-#   bash scripts/run_g5_pilot.sh generate     # Step 2: generate 12 configs (GPU)
-#   bash scripts/run_g5_pilot.sh evaluate     # Step 3: evaluate all 13 models (CPU)
+#   bash scripts/run_g5_pilot.sh generate     # Step 2: generate 8 configs (GPU)
+#   bash scripts/run_g5_pilot.sh evaluate     # Step 3: evaluate all 9 models (CPU)
 #   bash scripts/run_g5_pilot.sh compare      # Step 4: comparison table (CPU)
 #   bash scripts/run_g5_pilot.sh analyze      # Step 5: outlier-aware analysis (CPU)
 #   bash scripts/run_g5_pilot.sh all          # Steps 1-5 sequentially
@@ -32,7 +32,7 @@ CAL_FILE="configs/guidance/calibration_v1_no_remask.json"
 HYDRA_OVERRIDES="noise=loglinear eval.unmasking_mode=llada eval.top_p=0.9 eval.remasking.enabled=false"
 
 # Grids
-ALPHAS=(0.01 0.05 0.1 0.15 0.2 0.3)
+ALPHAS=(0.01 0.05 0.15 0.3)
 KS=(16 24)
 
 BASELINE_MODEL="llada_topp0.9_no_remask"
@@ -64,7 +64,7 @@ step_calibrate() {
 
 # --- Step 2: Generate guided samples ---
 step_generate() {
-    print_header "Generate 12 guided configs (GPU)"
+    print_header "Generate 8 guided configs (GPU)"
     echo "  Grid: α ∈ {${ALPHAS[*]}} × K ∈ {${KS[*]}}"
 
     local run=1
@@ -92,7 +92,7 @@ step_generate() {
 
 # --- Step 3: Evaluate (baseline + 12 guided) ---
 step_evaluate() {
-    print_header "Evaluate baseline + 12 guided models (CPU)"
+    print_header "Evaluate baseline + 8 guided models (CPU)"
 
     # Re-evaluate the unguided baseline WITH constraint metrics
     echo "--- Evaluating baseline: $BASELINE_MODEL ---"
@@ -198,13 +198,13 @@ case "$STEP" in
         echo ""
         echo "Steps:"
         echo "  calibrate   Calibrate P90 normalizers (CPU, ~30s)"
-        echo "  generate    Generate 12 guided configs (GPU)"
-        echo "  evaluate    Evaluate baseline + 12 guided (CPU)"
+        echo "  generate    Generate 8 guided configs (GPU)"
+        echo "  evaluate    Evaluate baseline + 8 guided (CPU)"
         echo "  compare     Generate comparison table (CPU)"
         echo "  analyze     Outlier-aware analysis plots (CPU)"
         echo "  all         Run all steps sequentially"
         echo ""
-        echo "Grid: α ∈ {0.01, 0.05, 0.1, 0.15, 0.2, 0.3} × K ∈ {16, 24} = 12 configs"
+        echo "Grid: α ∈ {0.01, 0.05, 0.15, 0.3} × K ∈ {16, 24} = 8 configs"
         echo "Variant: v1 + llada + top-p=0.9 + no remasking, soft reward"
         ;;
 esac
