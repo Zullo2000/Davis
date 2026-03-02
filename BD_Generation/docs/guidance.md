@@ -231,6 +231,15 @@ The model call is shared across all K candidates (the bottleneck). Scoring is a 
 
 4. **one_living was trivially satisfied** (100% in all configs including baseline) — provided no signal. Replaced with `between_2_and_3_bathrooms` (CountRange) for Round 2.
 
+**Timing** (from file timestamps on jabiru, under GPU contention with another user's training job sharing the A5000):
+
+| K | Steady-state per config (5000 samples) | Per sample |
+|---|----------------------------------------|------------|
+| 4 | ~45 min | ~0.54s |
+| 16 | ~2h 50min | ~2.0s |
+
+K=16 is ~3.8x slower than K=4 (close to the theoretical 4x from scoring 4x more candidates per step). The first K=16 run took ~4h due to CUDA warmup / varying contention — subsequent K=16 runs were consistent at ~2h 50min. With a free GPU, generation should be ~60x faster (estimated ~3s per config, ~0.03s per sample for K=16).
+
 **Design decisions taken**: fix α near 0.1, fix K=16, proceed with finer α sweep and revised constraint set.
 
 ### Understanding the guidance dynamics
@@ -256,3 +265,103 @@ Per-constraint violation trajectories under low α appear jumpier (non-monotone)
 #### Why not α→0?
 
 With α→0, the softmax becomes a hard argmax: the highest-reward candidate is deterministically selected at every step. This causes **diversity collapse** — greedy selection at each of 100 steps funnels all samples down the same narrow path, producing near-identical outputs and potentially trapping the model in locally optimal but globally poor trajectories. The stochastic selection at α=0.1 strikes a balance: strong enough to meaningfully steer (ESS drops to 2–4 when candidates differ), soft enough to preserve diversity.
+
+### Round 2 — K* sweep (2026-03-02)
+
+#### Motivation
+
+Round 1 established α=0.1 as the effective guidance temperature and K=16 as better than K=4. However, the Round 2 fine α sweep (α ∈ {0.01, 0.05, 0.15, 0.3} × K ∈ {16, 24}, 5000 samples each) proved too slow under GPU contention (~2h50min per K=16 config at 5000 samples). The objective shifted to a more targeted question: **what is the minimal K\* that gives good constraint satisfaction?** Beyond K\*, more candidates yield diminishing returns — finding K\* allows future experiments to run faster without sacrificing quality.
+
+A secondary question: does K\* differ between no-remasking and confidence remasking? Remasking undoes some committed tokens each step, which could either fight guidance (requiring higher K\*) or provide self-correction (allowing lower K\*).
+
+#### Setup
+
+- **Fixed**: α=0.1, soft reward, v1 loglinear checkpoint, revised 4-constraint set (one_kitchen, kitchen_near_living, no_bath_kitchen, between_2_and_3_bathrooms)
+- **Sweep**: K ∈ {4, 8, 10, 12, 14, 16, 20, 24}
+- **Variants**: no-remasking + confidence remasking (tsw=1.0)
+- **Reduced samples**: 2 seeds (42, 123) × 100 samples = 200 per config. CI ≈ ±6% on Satisfaction (all) — sufficient to identify the plateau region, not to distinguish adjacent K values
+- **Script**: `run_g5_kstar.sh noremask all && run_g5_kstar.sh confidence all`
+- **Constraint set note**: the revised set includes `between_2_and_3_bathrooms` (CountRange, Bathroom ∈ [2,3]), which replaced the trivially-satisfied `one_living`. This makes the baseline much harder (13% vs 43% in Round 1).
+
+#### Timing (on jabiru A5000, under GPU contention)
+
+| K | No-remasking (min) | Confidence (min) |
+|---|---|---|
+| 4 | ~9 | ~5 |
+| 8 | ~9 | ~5 |
+| 10 | ~7 | ~4 |
+| 12 | ~7 | ~6 |
+| 14 | ~6 | ~6 |
+| 16 | ~7 | ~7 |
+| 20 | ~8 | ~9 |
+| 24 | ~9 | ~11 |
+| **Total** | **~53 min** | **~48 min** |
+
+Total wall-clock for both variants (generation only): ~1h 41min. Per-sample cost scales roughly linearly with K, but the 200-sample batches are small enough that overhead dominates at low K.
+
+#### Results — Satisfaction (all)
+
+| K | No-remasking | Confidence remasking |
+|---|---|---|
+| baseline | 13.3 ± 1.2% | 16.7 ± 1.1% |
+| 4 | 39.0 ± 1.0% | 32.5 ± 2.5% |
+| 8 | 51.5 ± 2.5% | 39.0 ± 4.0% |
+| 10 | 49.5 ± 1.5% | 48.0 ± 3.0% |
+| 12 | **56.5 ± 4.5%** | 49.0 ± 1.0% |
+| 14 | 56.5 ± 4.5% | 53.0 ± 4.0% |
+| 16 | 56.5 ± 2.5% | 55.5 ± 2.5% |
+| 20 | 53.0 ± 6.0% | 56.0 ± 4.0% |
+| 24 | 57.5 ± 2.5% | **61.0 ± 2.0%** |
+
+#### Findings
+
+1. **No-remasking: K\* ≈ 12.** Satisfaction plateaus at ~56% for K=12–24 (all within the ±6% CI). No meaningful improvement beyond K=12. The big gains come from K=4→8 (+12.5pp) and K=4→12 (+17.5pp).
+
+2. **Confidence remasking: no clear plateau — K\* > 24.** The curve keeps climbing: K=12 (49%) → K=16 (55.5%) → K=24 (61%). The K=20→24 jump of +5pp suggests gains continue beyond K=24. Remasking fights guidance by undoing committed tokens, so more candidates are needed to compensate.
+
+3. **Remasking shifts K\* UP, not down.** The "self-correction" hypothesis (remasking fixes guidance mistakes → fewer candidates needed) is not supported. Instead, remasking destroys some guidance progress each step, requiring a larger candidate pool to maintain steering pressure.
+
+4. **Confidence remasking may ultimately achieve higher satisfaction** — at K=24 it reaches 61% vs no-remasking's 57.5%. The remasking adds exploration that may help escape local optima, but only if K is large enough to overcome the per-step destruction.
+
+5. **The bottleneck constraint is `no_bath_kitchen`** (ForbidAdj). Even at K=24: 72% (no-remask), 79.5% (confidence). The other 3 constraints are near-saturated by K=10:
+   - `one_kitchen`: 99–100% by K=10
+   - `kitchen_near_living`: 99–100% by K=10
+   - `between_2_and_3_bathrooms`: ~84% (no-remask) / ~80% (confidence) by K=10
+
+6. **Quality tradeoff is notable.** Guidance degrades distribution fidelity:
+   - Cond. edge TV: +0.10 (no-remask K=12) / +0.07 (confidence K=16) vs baselines
+   - Mode coverage (weighted): drops from 70%→51% (no-remask) / 73%→45% (confidence)
+   - Unique archetypes: halved (no-remask) / quartered (confidence)
+   - Validity, spatial transitivity: unaffected (100%)
+
+#### Per-constraint breakdown — no-remasking
+
+| K | one_kitchen | kitchen_near_living | no_bath_kitchen | between_2_and_3_bathrooms |
+|---|---|---|---|---|
+| baseline | 91.3% | 91.3% | 52.0% | 49.2% |
+| 4 | 97.5% | 97.5% | 57.5% | 75.5% |
+| 8 | 99.0% | 99.0% | 63.0% | 84.5% |
+| 12 | 99.5% | 99.5% | 70.0% | 83.5% |
+| 16 | 100% | 100% | 68.0% | 85.0% |
+| 24 | 99.5% | 99.5% | 72.0% | 84.5% |
+
+`one_kitchen` and `kitchen_near_living` saturate by K=8. `between_2_and_3_bathrooms` saturates by K=8 (~84%). The only constraint that keeps improving with K is `no_bath_kitchen` (52% → 72%), but even this has diminishing returns after K=12.
+
+#### Per-constraint breakdown — confidence remasking
+
+| K | one_kitchen | kitchen_near_living | no_bath_kitchen | between_2_and_3_bathrooms |
+|---|---|---|---|---|
+| baseline | 81.3% | 92.0% | 46.6% | 58.9% |
+| 4 | 96.0% | 97.0% | 62.5% | 67.0% |
+| 8 | 98.0% | 98.5% | 68.0% | 68.0% |
+| 12 | 98.5% | 99.0% | 68.5% | 77.0% |
+| 16 | 98.5% | 99.5% | 74.0% | 81.5% |
+| 24 | 99.5% | 99.5% | 79.5% | 79.5% |
+
+Same pattern: `one_kitchen` and `kitchen_near_living` saturate early. `no_bath_kitchen` keeps improving steadily even to K=24 (46.6% → 79.5%). `between_2_and_3_bathrooms` reaches ~80% by K=12–16.
+
+#### Practical recommendations
+
+- **No-remasking: use K=12** for future experiments. The plateau is clear and this saves ~25% compute vs K=16.
+- **Confidence remasking: use K=16 minimum, K=20–24 if compute budget allows.** The curve hasn't flattened.
+- **α fine-tuning** should be revisited at the chosen K\* (next experiment round). The current α=0.1 was established on the old constraint set; the harder `between_2_and_3_bathrooms` may benefit from a different α.

@@ -7,7 +7,7 @@
 
 
 ## Overall Status
-- Current phase: G5 IN PROGRESS (pilot v1 complete, constraint set revised, re-run pending)
+- Current phase: G5 IN PROGRESS (K* sweep complete, next: α fine-tuning at chosen K*)
 - Dependencies: v1 pipeline complete, v2 (MELD) trained and evaluated
 
 ### Dependency Graph
@@ -170,7 +170,7 @@ None. Implementation follows spec exactly.
 ---
 
 ## Phase G5 — End-to-End Integration + Tuning
-Status: IN PROGRESS (Round 1 complete, Round 2 prepared — fine α sweep with revised constraints)
+Status: IN PROGRESS (K* sweep complete, next: α fine-tuning at chosen K*)
 
 ### What was built (prep)
 1. **CLI overrides** in `generate_guided.py`: Added `--reward-mode` (soft/hard) and `--calibration` (JSON path) flags. Consistent with existing `--alpha`/`--K` pattern. Enables soft vs hard comparison without separate YAML files.
@@ -216,18 +216,18 @@ Fine α sweep with revised constraints. Combines constraint revision + finer gri
 2. ~~**Constraint set revision**~~: DONE. Replaced `one_living` → `between_2_and_3_bathrooms`.
 3. ~~**Analysis pipeline upgrade**~~: DONE. Outlier-aware `--plot-analysis`.
 4. ~~**Round 2 — Fine α sweep**~~: SUPERSEDED by K* sweep (Round 2 was too slow at 5000 samples).
-5. **K* sweep — find minimal K for good constraint satisfaction** (16 configs): PENDING.
-   - **Goal**: find K* where satisfaction plateaus (beyond which more candidates don't help much).
-   - **Fixed**: α=0.1, soft reward, v1 loglinear checkpoint.
-   - **Sweep**: K ∈ {4, 8, 10, 12, 14, 16, 20, 24} (8 values).
-   - **Variants**: 2 (no-remasking + confidence remasking tsw=1.0).
-   - **Reduced samples**: 2 seeds (42, 123) × 100 samples = 200 per config. CI ≈ ±6% on satisfaction (vs ±1.2% at 5000). Sufficient to identify the plateau region.
-   - **Runtime estimate**: ~1.5–2h under GPU contention.
-   - **Script**: `run_g5_kstar.sh` (5 steps: calibrate → generate → evaluate → compare → analyze).
-   - **Output**: `comparison_guided_kstar_noremask.md` + `comparison_guided_kstar_confidence.md`.
-   - **Key question**: does remasking shift K* up (fighting guidance → need more candidates) or down (self-correcting → fewer candidates suffice)?
-6. **After K* sweep**: Fine-tune α at the chosen K*, then expand to v2 variants if warranted.
+5. ~~**K* sweep — find minimal K for good constraint satisfaction**~~ (16 configs): DONE (2026-03-02).
+   - **Result (no-remasking)**: K*≈12. Plateau at ~56% satisfaction for K=12–24.
+   - **Result (confidence)**: No plateau — curve still climbing at K=24 (61%). K*>24.
+   - **Key finding**: remasking shifts K* UP (fights guidance, needs more candidates).
+   - **Runtime**: 53 min (no-remask) + 48 min (confidence) generation under GPU contention.
+   - **Details**: see `docs/guidance.md` §Round 2 — K* sweep.
+6. **Round 3 — α fine-tuning at K\***: NEXT.
+   - No-remasking: sweep α around 0.1 at K=12.
+   - Confidence: sweep α around 0.1 at K=16 (or K=20/24 if budget allows).
+   - Use same reduced setup (2 seeds × 100 samples = 200/config).
 7. Consider: hard reward mode comparison at best α/K.
+8. Expand to v2 variants if warranted.
 
 ### Files modified
 - `scripts/generate_guided.py` (added `--reward-mode`, `--calibration` CLI overrides)
