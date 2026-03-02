@@ -1,0 +1,6 @@
+{
+  "one_kitchen": 1.0,
+  "one_living": 1.0,
+  "kitchen_near_living": 1.0,
+  "no_bath_kitchen": 2.0
+}

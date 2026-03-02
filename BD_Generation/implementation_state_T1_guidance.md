@@ -7,7 +7,7 @@
 
 
 ## Overall Status
-- Current phase: G5 IN PROGRESS (prep complete, ready for jabiru runs)
+- Current phase: G5 IN PROGRESS (pilot v1 complete, constraint set revised, re-run pending)
 - Dependencies: v1 pipeline complete, v2 (MELD) trained and evaluated
 
 ### Dependency Graph
@@ -170,30 +170,66 @@ None. Implementation follows spec exactly.
 ---
 
 ## Phase G5 — End-to-End Integration + Tuning
-Status: IN PROGRESS (pilot run: 6 configs ready for jabiru)
+Status: IN PROGRESS (Round 1 complete, Round 2 prepared — fine α sweep with revised constraints)
 
 ### What was built (prep)
 1. **CLI overrides** in `generate_guided.py`: Added `--reward-mode` (soft/hard) and `--calibration` (JSON path) flags. Consistent with existing `--alpha`/`--K` pattern. Enables soft vs hard comparison without separate YAML files.
 2. **`run_g5_experiments.sh`**: Comprehensive experiment automation for jabiru (full 60-config grid). 5 steps dispatched via `bash run_g5_experiments.sh step1|step2|step3|step4|step5`.
-3. **`run_g5_pilot.sh`**: Focused 6-config pilot experiment (v1 + llada + top-p=0.9 + no remasking, α∈{0.1,1.0,5.0} × K∈{4,16}). Validates metrics before committing to full grid.
-4. **`analyze_guidance_stats.py`**: Reads `_samples.pt` guidance diagnostics. Single-model analysis (ESS, max_weight, reward_gap, remasking_delta, per-constraint trajectories). `--compare-modes` for soft vs hard decision table. `--export-tsv` for plotting.
+3. **`run_g5_pilot.sh`**: Pilot experiment script. Updated for Round 2: α∈{0.01,0.05,0.1,0.15,0.2,0.3} × K∈{16,24} = 12 configs. Includes 5 steps: calibrate, generate, evaluate, compare, analyze.
+4. **`analyze_guidance_stats.py`**: Reads `_samples.pt` guidance diagnostics. Single-model analysis (ESS, max_weight, reward_gap, remasking_delta, per-constraint trajectories). `--compare-modes` for soft vs hard decision table. `--export-tsv` for plotting. **New: `--plot-analysis` outlier-aware pipeline** (see below).
 5. **Constraint metrics in comparison tables**: Added `_build_constraint_table()` to `save_utils.py` — dynamically detects `constraint/*` keys and renders satisfaction rates, mean violations in comparison.md. Also added guidance config params (K, alpha, reward_mode) to config table.
 
-### Experiment plan (revised)
-1. **Pilot run** (6 configs): v1 + llada + top-p=0.9 + no remasking, α∈{0.1,1.0,5.0} × K∈{4,16}. Validate that constraint satisfaction metrics, comparison tables, and GuidanceStats diagnostics work correctly before scaling up.
-2. **Full grid** (after pilot validation): Extend to 4 variants × 5 α × 3 K = 60 configs.
-3. **Generate guided samples** across 4 model variants:
-   - v1 + llada + top-p=0.9 + no remasking
-   - v1 + llada + top-p=0.9 + confidence remasking tsw=1.0
-   - v2 + llada + top-p=0.9 + no remasking
-   - v2 + llada + top-p=0.9 + confidence remasking tsw=1.0
-4. **α grid**: [0.1, 0.5, 1.0, 2.0, 5.0]
-5. **K grid**: [4, 8, 16]
-6. **Full evaluation** with `--guidance-config` → comparison tables.
+### Pilot v1 results (6 configs, completed 2026-02-28)
+Ran α∈{0.1,1.0,5.0} × K∈{4,16}, v1 + llada + top-p=0.9 + no remasking, soft reward. Old constraint set (one_kitchen, one_living, kitchen_near_living, no_bath_kitchen).
+- **α=0.1 is the sweet spot**: K=16 α=0.1 → 77% satisfaction (2× baseline 43.3%). α≥1.0 barely moves (~48%).
+- **Quality tradeoff mild**: diversity -4%, cond. edge TV +0.045 at α=0.1. 100% validity everywhere.
+- **one_living always 100%** → uninformative constraint, replaced (see below).
+- Dynamic analysis written up in `docs/guidance.md` §Pilot Results (ESS, reward trajectory, reward gap, violations, α→0 discussion).
+
+### Constraint set revision (2026-03-02)
+Replaced `one_living` (trivially satisfied) with `between_2_and_3_bathrooms` (CountRange, Bathroom ∈ [2,3]) in `configs/guidance/example_basic.yaml`. New set:
+1. `one_kitchen` — ExactCount(Kitchen, 1)
+2. `kitchen_near_living` — RequireAdj(Kitchen, LivingRoom)
+3. `no_bath_kitchen` — ForbidAdj(Bathroom, Kitchen)
+4. `between_2_and_3_bathrooms` — CountRange(Bathroom, 2–3)
+
+**All existing pilot results and calibration are stale** — must re-calibrate and re-run.
+
+### Analysis pipeline upgrade (2026-03-02)
+Distribution plots (histograms at final step) were uninformative — values concentrated around discrete points. Replaced with outlier-aware pipeline (`--plot-analysis`):
+1. **Outlier detection**: P1 of final-step reward (bottom 1% = outliers). Configurable via `--outlier-percentile`.
+2. **Trimmed scalar means**: final-step ESS, reward, reward gap, per-constraint violations — computed on clean samples (P1+ only).
+3. **Two trajectory plots per config**: `*_trajectories_outliers.png` (2 random P1 samples) and `*_trajectories_clean.png` (2 random non-outlier samples). Reproducible via `--analysis-seed`.
+4. Legacy `--plot-distributions` and `--plot-trajectories` preserved for backward compat.
+
+### Round 2 setup (2026-03-02)
+Fine α sweep with revised constraints. Combines constraint revision + finer grid into a single round.
+- **Grid**: α ∈ {0.01, 0.05, 0.1, 0.15, 0.2, 0.3} × K ∈ {16, 24} = 12 configs
+- **Variant**: v1 + llada + top-p=0.9 + no remasking, soft reward
+- **Constraints**: one_kitchen, kitchen_near_living, no_bath_kitchen, between_2_and_3_bathrooms
+- **Script**: `run_g5_pilot.sh` updated with 5 steps: calibrate → generate → evaluate → compare → analyze
+- **Output**: `comparison_guided_round2.md` + per-config `*_trajectories_outliers.png` / `*_trajectories_clean.png`
+- **Rationale**: Round 1 showed α=0.1 is sweet spot but only tested {0.1, 1.0, 5.0}. Need finer resolution around 0.1 to find optimal. K=24 tests whether more candidates further improves satisfaction beyond K=16.
+
+### Experiment plan (revised post-Round 1)
+1. ~~**Round 1 — Coarse sweep** (6 configs)~~: DONE. α=0.1 sweet spot, K=16 > K=4. Old constraint set (included trivially-satisfied `one_living`).
+2. ~~**Constraint set revision**~~: DONE. Replaced `one_living` → `between_2_and_3_bathrooms`.
+3. ~~**Analysis pipeline upgrade**~~: DONE. Outlier-aware `--plot-analysis`.
+4. **Round 2 — Fine α sweep** (12 configs): α ∈ {0.01, 0.05, 0.1, 0.15, 0.2, 0.3} × K ∈ {16, 24}. Soft reward, v1 no-remask. Re-calibrate first. Script: `run_g5_pilot.sh all`.
+5. **Expand to other model variants** (if Round 2 is satisfactory):
+   - v1 + confidence remasking (tsw=1.0)
+   - v2 + no remasking
+   - v2 + confidence remasking
+6. Consider: hard reward mode comparison at best α.
+7. **Full evaluation** with `--guidance-config` + `--plot-analysis` → comparison tables + trimmed means + trajectory plots.
 
 ### Files modified
 - `scripts/generate_guided.py` (added `--reward-mode`, `--calibration` CLI overrides)
 - `eval_results/save_utils.py` (added `_build_constraint_table()` for dynamic constraint metrics in comparison, added guidance config params to config table)
+- `scripts/analyze_guidance_stats.py` (added `--plot-analysis` outlier-aware pipeline: `_classify_outliers`, `_collect_trimmed_final_means`, `plot_analysis`, `_plot_trajectory_figure` helper; refactored `plot_trajectories` to use shared helper)
+- `configs/guidance/example_basic.yaml` (replaced `one_living` with `between_2_and_3_bathrooms`)
+- `docs/guidance.md` (added: Soft vs Hard reward mode section, Pilot Results dynamic analysis §1–5, aggregate results table with reward mode column)
+- `scripts/run_g5_pilot.sh` (Round 2: updated grid to α∈{0.01..0.3}×K∈{16,24}, added `analyze` step, output → `comparison_guided_round2.md`)
 
 ### Files created
 - `scripts/run_g5_experiments.sh` (experiment automation, 5 steps — full grid)
@@ -201,10 +237,10 @@ Status: IN PROGRESS (pilot run: 6 configs ready for jabiru)
 - `scripts/analyze_guidance_stats.py` (trajectory diagnostics + soft/hard comparison)
 
 ### Test results
-- 124 guidance tests: **all pass** (no regressions from CLI additions — generate_guided.py is a script, not unit-tested directly)
+- 114 guidance tests: **all pass** (no regressions from analysis pipeline or constraint config changes)
 
 ### Parallelization
-4 variants × 5 α × 3 K = 60 configs, independent GPU runs. Soft-vs-hard comparison (step 2) completes first to select reward mode for remaining grid.
+Round 2: 6 α × 2 K = 12 configs (single variant, soft reward). Future full grid: 4 variants × N α × M K, independent GPU runs.
 
 ### What to monitor
 - ESS(t) curves across α (active but not degenerate?)

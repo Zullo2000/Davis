@@ -75,6 +75,16 @@ w_k ∝ exp(r / α)
 - `φ` = shaping function: `linear` (default), `quadratic`, `log1p`
 - `α` = guidance temperature (higher = weaker guidance)
 
+### Soft vs Hard Reward Mode
+
+The `reward_mode` parameter controls how each candidate is scored at every denoising step:
+
+- **Soft mode**: uses the model's probability distributions (`softmax(logits)`) at masked positions. A position that's 70% likely to be Kitchen contributes 0.7 to the expected kitchen count. Produces smooth, continuous violation values that change gradually as the model's beliefs evolve.
+
+- **Hard mode**: applies argmax on logits to get a single predicted token per masked position, then counts discrete violations on the decoded graph. Binary — a position is either Kitchen or it isn't. More accurate reflection of the final decoded output, but discontinuous (small logit changes can flip the argmax and cause violation jumps).
+
+Both modes produce a reward `r(candidate)` that feeds into the same importance weighting: `w_k = softmax(r / α)`. The α temperature then controls how aggressively those rewards translate into selection pressure. All pilot results below use soft mode.
+
 ## Configuration
 
 Constraints are specified in YAML/JSON via Pydantic-validated schemas:
@@ -185,3 +195,64 @@ Guidance-specific args (`--guidance-config`, `--alpha`, `--K`, `--guidance-tag`)
 | 16 | 1 (shared) | 16×B scores | ~1x model + 16x scoring |
 
 The model call is shared across all K candidates (the bottleneck). Scoring is a Python loop over K×B — acceptable for K≤16, B≤64. Vectorized scoring is a future optimization.
+
+## Gradual Discoveries — Design Choices & Tuning
+
+> Updated as new experiment rounds bring insights. Each round appends findings; older rounds are kept for context.
+
+### Design choices under exploration
+
+| Hyperparameter | What it controls | Range explored so far |
+|----------------|-----------------|----------------------|
+| **α** (guidance temperature) | Selection sharpness: `w_k = softmax(r / α)`. Smaller α = sharper softmax = stronger guidance. | 0.1, 1.0, 5.0 |
+| **K** (num candidates) | Pool size per denoising step. More candidates = more options to select from. | 4, 16 |
+| **Reward mode** | How candidates are scored: soft (probability-based) vs hard (argmax-based). See §Soft vs Hard above. | soft |
+| **Constraint set** | Which architectural rules to enforce. | See below |
+
+### Comparison metrics
+
+- **Satisfaction (all)**: % of samples where ALL constraints are simultaneously met. Primary metric — this is what guidance exists to improve.
+- **Diversity**: pairwise distance between generated samples. Measures whether guidance collapses output variety.
+- **Cond. edge TV**: total variation distance of edge distributions conditioned on node types. Lower = closer to training data distribution. Measures quality degradation from guidance.
+- **Validity**: structural validity rate. Must stay at 100% — guidance should never break the model.
+- **Guidance diagnostics** (trajectory-based, via `--plot-analysis`): ESS, reward gap, per-constraint violations. Used to understand *how* guidance steers, not just the outcome. Outlier analysis (P1 cutoff) separates clean samples from failure cases.
+
+### Round 1 — Coarse α/K sweep (2026-02-28)
+
+**Setup**: v1 + llada + top-p=0.9 + no remasking, soft reward, 5000 samples (5 seeds × 1000). Constraints: one_kitchen, one_living, kitchen_near_living, no_bath_kitchen.
+
+**Findings**:
+
+1. **α=0.1 is the only effective temperature.** α=1.0 and α=5.0 barely improve over the unguided baseline (~43% → ~48% and ~44% respectively). At α=0.1, satisfaction jumps to 68–77%. The softmax at α≥1.0 is too flat to meaningfully differentiate candidates — ESS stays near K (uniform weights), and the reward gap fluctuates around zero.
+
+2. **K=16 > K=4** — more candidates helps. At α=0.1: 77% (K=16) vs 68.5% (K=4). The larger pool gives guidance more options to select from at each step.
+
+3. **Quality tradeoff is mild at α=0.1**: diversity drops ~4%, cond. edge TV worsens by +0.045. Mode coverage, spatial transitivity, and node TV are essentially unchanged. Validity stays at 100%.
+
+4. **one_living was trivially satisfied** (100% in all configs including baseline) — provided no signal. Replaced with `between_2_and_3_bathrooms` (CountRange) for Round 2.
+
+**Design decisions taken**: fix α near 0.1, fix K=16, proceed with finer α sweep and revised constraint set.
+
+### Understanding the guidance dynamics
+
+The following observations were established during Round 1 and are expected to hold generally. They explain *why* the metrics behave as they do.
+
+#### ESS and α
+
+ESS = 1 / Σ(w_k²). At low α (sharp softmax), even moderate reward differences among K candidates cause one or two to absorb most of the weight, crashing ESS toward 1–2. At other timesteps — especially early when most tokens are masked — candidates are nearly identical, so ESS recovers toward K. This creates high variability in the ESS trajectory, which is a signature of **active steering**. At high α (flat softmax), ESS stays near K, meaning the guidance is not differentiating between candidates.
+
+#### Reward trajectory
+
+The reward of the selected candidate increases at a similar pace for all α values. This is because the bulk of the reward increase comes from the **base model denoising** (tokens getting unmasked, structure emerging), not from guidance selection. What guidance does is **cumulative**: consistently picking the slightly-better candidate at each of 100 steps compounds into the large final-satisfaction gap, even though the per-step advantage is small. The guidance gets its leverage in the middle regime of denoising, where candidates meaningfully differ.
+
+#### Reward gap and stochastic selection
+
+The reward gap (reward_selected - mean_reward_all_K) can be negative because selection is **stochastic multinomial sampling**, not deterministic argmax. Any candidate with non-zero weight can be selected, including below-average ones. At α=0.1 negative gaps are rare (sharp softmax); at α=1.0 they are common (~50%, consistent with near-random selection). This stochasticity is by design — deterministic argmax would destroy diversity.
+
+#### Violation trajectories and candidate switching
+
+Per-constraint violation trajectories under low α appear jumpier (non-monotone) than under high α. This is because a *different* candidate often wins at adjacent steps, so the trajectory stitches together snapshots from different candidates. A candidate that minimizes total energy may have higher violation on one specific constraint than the previous step's winner. With high α, selection is near-random, so the trajectory follows the model's natural (smooth, monotone) denoising curve — but this smoothness reflects the absence of steering, not superior guidance. **Trajectory smoothness is not a proxy for guidance quality.**
+
+#### Why not α→0?
+
+With α→0, the softmax becomes a hard argmax: the highest-reward candidate is deterministically selected at every step. This causes **diversity collapse** — greedy selection at each of 100 steps funnels all samples down the same narrow path, producing near-identical outputs and potentially trapping the model in locally optimal but globally poor trajectories. The stochastic selection at α=0.1 strikes a balance: strong enough to meaningfully steer (ESS drops to 2–4 when candidates differ), soft enough to preserve diversity.

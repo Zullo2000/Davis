@@ -11,7 +11,19 @@ Usage::
         --schedule loglinear_noise_sc \
         --model llada_topp0.9_no_remask_guided_basic_K16_a1.0
 
-    # Distribution plots (histograms over all 5000 samples)
+    # Outlier-aware analysis (recommended): trimmed means + trajectory plots
+    python scripts/analyze_guidance_stats.py \
+        --schedule loglinear_noise_sc \
+        --model llada_topp0.9_no_remask_guided_basic_K16_a1.0 \
+        --plot-analysis
+
+    # Custom outlier percentile and analysis RNG seed
+    python scripts/analyze_guidance_stats.py \
+        --schedule loglinear_noise_sc \
+        --model llada_topp0.9_no_remask_guided_basic_K16_a1.0 \
+        --plot-analysis --outlier-percentile 5 --analysis-seed 42
+
+    # (Legacy) Distribution plots (histograms over all 5000 samples)
     python scripts/analyze_guidance_stats.py \
         --schedule loglinear_noise_sc \
         --model llada_topp0.9_no_remask_guided_basic_K16_a1.0 \
@@ -328,6 +340,132 @@ def _collect_final_step_values(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Outlier classification
+# ---------------------------------------------------------------------------
+
+
+def _classify_outliers(
+    per_seed: dict[str, list[list[dict]]],
+    batch_size: int,
+    percentile: float = 1.0,
+) -> tuple[float, list[tuple[str, int]], list[tuple[str, int]], dict[tuple[str, int], float]]:
+    """Classify samples as outliers based on final-step reward.
+
+    Outliers are samples whose final reward falls below the given percentile
+    (bottom tail only — asymmetric cut).
+
+    Returns
+    -------
+    threshold : float
+        The percentile cutoff value.
+    outlier_ids : list of (seed_key, global_sample_idx)
+        Samples with final reward < threshold.
+    clean_ids : list of (seed_key, global_sample_idx)
+        Samples with final reward >= threshold.
+    all_rewards : dict mapping (seed_key, global_sample_idx) -> final reward
+    """
+    import numpy as np
+
+    all_rewards: dict[tuple[str, int], float] = {}
+
+    for seed_key, batches in per_seed.items():
+        for batch_idx, batch_steps in enumerate(batches):
+            if not batch_steps:
+                continue
+            final = batch_steps[-1]
+            reward = final.get("reward_selected")
+            if reward is None:
+                continue
+            if isinstance(reward, torch.Tensor):
+                for local_idx in range(reward.numel()):
+                    global_idx = batch_idx * batch_size + local_idx
+                    all_rewards[(seed_key, global_idx)] = reward[local_idx].item()
+            else:
+                global_idx = batch_idx * batch_size
+                all_rewards[(seed_key, global_idx)] = float(reward)
+
+    if not all_rewards:
+        return 0.0, [], list(all_rewards.keys()), all_rewards
+
+    values = list(all_rewards.values())
+    threshold = float(np.percentile(values, percentile))
+
+    outlier_ids = [k for k, v in all_rewards.items() if v < threshold]
+    clean_ids = [k for k, v in all_rewards.items() if v >= threshold]
+
+    return threshold, outlier_ids, clean_ids, all_rewards
+
+
+def _collect_trimmed_final_means(
+    per_seed: dict[str, list[list[dict]]],
+    clean_ids: set[tuple[str, int]],
+    batch_size: int,
+) -> dict[str, float]:
+    """Compute mean of final-step metrics over clean (non-outlier) samples.
+
+    Returns dict mapping metric_name -> trimmed mean.
+    """
+    accum: dict[str, list[float]] = {}
+
+    for seed_key, batches in per_seed.items():
+        for batch_idx, batch_steps in enumerate(batches):
+            if not batch_steps:
+                continue
+            final = batch_steps[-1]
+            for key in ["ess", "reward_selected", "reward_all_candidates",
+                        "reward_pre_remask", "reward_post_remask"]:
+                val = final.get(key)
+                if val is None:
+                    continue
+                if isinstance(val, torch.Tensor):
+                    for local_idx in range(val.numel()):
+                        global_idx = batch_idx * batch_size + local_idx
+                        if (seed_key, global_idx) in clean_ids:
+                            accum.setdefault(key, []).append(val[local_idx].item())
+                else:
+                    global_idx = batch_idx * batch_size
+                    if (seed_key, global_idx) in clean_ids:
+                        accum.setdefault(key, []).append(float(val))
+
+            # Derived metrics
+            sel = final.get("reward_selected")
+            allc = final.get("reward_all_candidates")
+            if isinstance(sel, torch.Tensor) and isinstance(allc, torch.Tensor):
+                gap = sel - allc
+                for local_idx in range(gap.numel()):
+                    global_idx = batch_idx * batch_size + local_idx
+                    if (seed_key, global_idx) in clean_ids:
+                        accum.setdefault("reward_gap", []).append(gap[local_idx].item())
+
+            post = final.get("reward_post_remask")
+            pre = final.get("reward_pre_remask")
+            if isinstance(post, torch.Tensor) and isinstance(pre, torch.Tensor):
+                delta = post - pre
+                for local_idx in range(delta.numel()):
+                    global_idx = batch_idx * batch_size + local_idx
+                    if (seed_key, global_idx) in clean_ids:
+                        accum.setdefault("remasking_delta", []).append(
+                            delta[local_idx].item()
+                        )
+
+            # Violations
+            if "violations" in final:
+                for vname, vvals in final["violations"].items():
+                    if isinstance(vvals, torch.Tensor):
+                        for local_idx in range(vvals.numel()):
+                            global_idx = batch_idx * batch_size + local_idx
+                            if (seed_key, global_idx) in clean_ids:
+                                accum.setdefault(
+                                    f"violation_{vname}", []
+                                ).append(vvals[local_idx].item())
+
+    means: dict[str, float] = {}
+    for k, vals in accum.items():
+        means[k] = sum(vals) / len(vals) if vals else 0.0
+    return means
+
+
 def plot_distributions(schedule: str, model: str) -> None:
     """Plot histograms of per-sample metrics at the final denoising step.
 
@@ -407,6 +545,106 @@ def plot_distributions(schedule: str, model: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Outlier-aware analysis pipeline
+# ---------------------------------------------------------------------------
+
+
+def plot_analysis(
+    schedule: str,
+    model: str,
+    outlier_percentile: float = 1.0,
+    analysis_seed: int = 0,
+) -> None:
+    """Outlier-aware analysis: trimmed means + trajectory plots.
+
+    1. Classify samples via P_k of final reward (bottom tail = outliers).
+    2. Print trimmed scalar means (excluding outliers).
+    3. Plot 2 random outlier trajectories -> ``{model}_trajectories_outliers.png``
+    4. Plot 2 random clean trajectories  -> ``{model}_trajectories_clean.png``
+    """
+    import random
+
+    config, per_seed, seeds = _load_per_sample_stats(schedule, model)
+    batch_size = config.get("batch_size", 64)
+    K = config.get("num_candidates", "?")
+    alpha = config.get("guidance_alpha", "?")
+
+    # --- 1. Classify ---
+    threshold, outlier_ids, clean_ids, all_rewards = _classify_outliers(
+        per_seed, batch_size, percentile=outlier_percentile,
+    )
+    n_total = len(all_rewards)
+    n_outliers = len(outlier_ids)
+
+    print(f"\n{'=' * 70}")
+    print(f"  Outlier Analysis: {model}")
+    print(f"  K={K}, \u03b1={alpha} | {n_total} samples, "
+          f"P{outlier_percentile:.0f} threshold = {threshold:.4f}")
+    print(f"  Outliers: {n_outliers} ({100*n_outliers/n_total:.1f}%)")
+    if outlier_ids:
+        outlier_rewards = [all_rewards[k] for k in outlier_ids]
+        print(f"  Outlier reward range: [{min(outlier_rewards):.4f}, "
+              f"{max(outlier_rewards):.4f}]")
+    print(f"{'=' * 70}")
+
+    # --- 2. Trimmed means ---
+    clean_set = set(clean_ids)
+    means = _collect_trimmed_final_means(per_seed, clean_set, batch_size)
+    if means:
+        print(f"\n  Trimmed means (N={n_total - n_outliers}, "
+              f"excluding P{outlier_percentile:.0f} outliers):")
+        display_order = [
+            ("ess", "ESS"),
+            ("reward_selected", "Reward (selected)"),
+            ("reward_gap", "Reward gap"),
+            ("remasking_delta", "Remasking delta"),
+        ]
+        for key, label in display_order:
+            if key in means:
+                print(f"    {label:<25s} {means[key]:.4f}")
+        violation_keys = sorted(k for k in means if k.startswith("violation_"))
+        for vk in violation_keys:
+            vname = vk.replace("violation_", "")
+            print(f"    viol: {vname:<20s} {means[vk]:.4f}")
+
+    # --- 3 & 4. Trajectory plots ---
+    rng = random.Random(analysis_seed)
+    out_dir = _PROJECT_ROOT / "eval_results" / schedule
+
+    for group_name, group_ids in [("outliers", outlier_ids),
+                                  ("clean", clean_ids)]:
+        if len(group_ids) == 0:
+            print(f"\n  No {group_name} samples to plot.")
+            continue
+
+        # Pick up to 2 random samples
+        picked = rng.sample(group_ids, min(2, len(group_ids)))
+
+        trajectories: dict[str, dict[str, list[float]]] = {}
+        for seed_key, global_idx in picked:
+            batches = per_seed[seed_key]
+            traj = _extract_sample_trajectory(batches, global_idx, batch_size)
+            if traj:
+                reward = all_rewards[(seed_key, global_idx)]
+                label = f"seed={seed_key} idx={global_idx} (r={reward:.3f})"
+                trajectories[label] = traj
+
+        if not trajectories:
+            print(f"\n  Could not extract trajectories for {group_name}.")
+            continue
+
+        title = (
+            f"{model}\nK={K}, \u03b1={alpha} | "
+            f"{group_name} (P{outlier_percentile:.0f}, "
+            f"threshold={threshold:.3f})"
+        )
+        out_path = out_dir / f"{model}_trajectories_{group_name}.png"
+        _plot_trajectory_figure(trajectories, config, title, out_path)
+
+    print()
+
+
+# ---------------------------------------------------------------------------
 # Time-evolution trajectory plots for individual samples
 # ---------------------------------------------------------------------------
 
@@ -476,58 +714,28 @@ def _extract_sample_trajectory(
     return result
 
 
-def plot_trajectories(
-    schedule: str, model: str, traj_seed: int | None = None,
+def _plot_trajectory_figure(
+    trajectories: dict[str, dict[str, list[float]]],
+    config: dict,
+    title: str,
+    out_path: Path,
 ) -> None:
-    """Plot time evolution of guidance metrics for 2 samples from one seed.
+    """Reusable helper: plot trajectory subplots and save to *out_path*.
 
-    Each metric gets its own subplot; both samples are overlaid in the same
-    subplot with different colors. Saved as ``{model}_trajectories.png``.
+    Parameters
+    ----------
+    trajectories : {label -> {metric_name -> [values_per_step]}}
+    config : run config dict (for K / alpha display)
+    title : figure suptitle
+    out_path : where to save the PNG
     """
     import matplotlib.pyplot as plt
 
-    config, per_seed, seeds = _load_per_sample_stats(schedule, model)
-    batch_size = config.get("batch_size", 64)
-
-    # Pick seed
-    if traj_seed is not None:
-        seed_key = str(traj_seed)
-    elif seeds:
-        seed_key = str(seeds[0])
-    else:
-        seed_key = next(iter(per_seed))
-
-    if seed_key not in per_seed:
-        print(f"Error: seed {seed_key} not found. Available: {list(per_seed.keys())}")
-        sys.exit(1)
-
-    batches = per_seed[seed_key]
-
-    # Pick 2 samples: first sample of first batch, first sample of second batch
-    # (to get diversity in sample characteristics).
-    sample_indices = [0, batch_size]
-    # Fall back to indices 0, 1 if only one batch
-    if len(batches) < 2:
-        sample_indices = [0, min(1, batch_size - 1)]
-
-    trajectories = {}
-    for si in sample_indices:
-        traj = _extract_sample_trajectory(batches, si, batch_size)
-        if traj:
-            trajectories[si] = traj
-
-    if not trajectories:
-        print(f"No per-sample trajectory data for seed {seed_key}")
-        return
-
-    # Collect all metric keys across both samples
     all_keys: set[str] = set()
     for traj in trajectories.values():
         all_keys.update(traj.keys())
 
-    # Order: core metrics first, then violations
-    core_order = ["ess", "reward_selected", "reward_gap",
-                  "remasking_delta"]
+    core_order = ["ess", "reward_selected", "reward_gap", "remasking_delta"]
     violation_keys = sorted(k for k in all_keys if k.startswith("violation_"))
     plot_keys = [k for k in core_order if k in all_keys] + violation_keys
     n_plots = len(plot_keys)
@@ -551,22 +759,19 @@ def plot_trajectories(
         "reward_gap": "Reward gap",
         "remasking_delta": "Remasking delta",
     }
-    colors = ["#1f77b4", "#d62728"]
-
-    K = config.get("num_candidates", "?")
-    alpha = config.get("guidance_alpha", "?")
+    colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e"]
 
     for idx, key in enumerate(plot_keys):
         ax = axes[idx]
         label = labels.get(key, key.replace("violation_", "viol: "))
-        for ci, (si, traj) in enumerate(trajectories.items()):
+        for ci, (sample_label, traj) in enumerate(trajectories.items()):
             if key in traj:
                 steps_range = range(len(traj[key]))
                 ax.plot(
                     steps_range, traj[key],
                     color=colors[ci % len(colors)],
                     linewidth=1.2, alpha=0.85,
-                    label=f"sample {si}",
+                    label=sample_label,
                 )
         ax.set_xlabel("Denoising step")
         ax.set_ylabel(label)
@@ -577,18 +782,62 @@ def plot_trajectories(
     for idx in range(n_plots, len(axes)):
         axes[idx].set_visible(False)
 
-    fig.suptitle(
-        f"{model}\nK={K}, \u03b1={alpha} | seed={seed_key}, "
-        f"samples {list(trajectories.keys())}",
-        fontsize=11, y=1.02,
-    )
+    fig.suptitle(title, fontsize=11, y=1.02)
     fig.tight_layout()
-
-    out_dir = _PROJECT_ROOT / "eval_results" / schedule
-    out_path = out_dir / f"{model}_trajectories_seed{seed_key}.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Trajectory plot saved: {out_path}")
+
+
+def plot_trajectories(
+    schedule: str, model: str, traj_seed: int | None = None,
+) -> None:
+    """Plot time evolution of guidance metrics for 2 samples from one seed.
+
+    Each metric gets its own subplot; both samples are overlaid in the same
+    subplot with different colors. Saved as ``{model}_trajectories_seed{}.png``.
+    """
+    config, per_seed, seeds = _load_per_sample_stats(schedule, model)
+    batch_size = config.get("batch_size", 64)
+
+    # Pick seed
+    if traj_seed is not None:
+        seed_key = str(traj_seed)
+    elif seeds:
+        seed_key = str(seeds[0])
+    else:
+        seed_key = next(iter(per_seed))
+
+    if seed_key not in per_seed:
+        print(f"Error: seed {seed_key} not found. Available: {list(per_seed.keys())}")
+        sys.exit(1)
+
+    batches = per_seed[seed_key]
+
+    # Pick 2 samples: first sample of first batch, first sample of second batch
+    sample_indices = [0, batch_size]
+    if len(batches) < 2:
+        sample_indices = [0, min(1, batch_size - 1)]
+
+    trajectories: dict[str, dict[str, list[float]]] = {}
+    for si in sample_indices:
+        traj = _extract_sample_trajectory(batches, si, batch_size)
+        if traj:
+            trajectories[f"sample {si}"] = traj
+
+    if not trajectories:
+        print(f"No per-sample trajectory data for seed {seed_key}")
+        return
+
+    K = config.get("num_candidates", "?")
+    alpha = config.get("guidance_alpha", "?")
+    title = (
+        f"{model}\nK={K}, \u03b1={alpha} | seed={seed_key}, "
+        f"samples {list(trajectories.keys())}"
+    )
+    out_dir = _PROJECT_ROOT / "eval_results" / schedule
+    out_path = out_dir / f"{model}_trajectories_seed{seed_key}.png"
+    _plot_trajectory_figure(trajectories, config, title, out_path)
 
 
 # ---------------------------------------------------------------------------
@@ -719,8 +968,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--plot-distributions", action="store_true",
-        help="Plot histograms of per-sample metrics at the final step "
-             "(requires per-sample stats in _samples.pt).",
+        help="(Legacy) Plot histograms of per-sample metrics at the final "
+             "step. Prefer --plot-analysis for the outlier-aware pipeline.",
     )
     parser.add_argument(
         "--plot-trajectories", action="store_true",
@@ -730,6 +979,20 @@ def main() -> None:
     parser.add_argument(
         "--traj-seed", type=int, default=None,
         help="Seed to use for --plot-trajectories (default: first seed).",
+    )
+    parser.add_argument(
+        "--plot-analysis", action="store_true",
+        help="Outlier-aware analysis: trimmed means + trajectory plots "
+             "for outlier and clean samples.",
+    )
+    parser.add_argument(
+        "--outlier-percentile", type=float, default=1.0,
+        help="Percentile for outlier cutoff (default: 1 = bottom 1%%).",
+    )
+    parser.add_argument(
+        "--analysis-seed", type=int, default=0,
+        help="RNG seed for random outlier/clean sample selection "
+             "(default: 0).",
     )
     parser.add_argument(
         "--list", action="store_true",
@@ -756,6 +1019,12 @@ def main() -> None:
             plot_trajectories(
                 args.schedule[0], args.model, traj_seed=args.traj_seed,
             )
+        if args.plot_analysis:
+            plot_analysis(
+                args.schedule[0], args.model,
+                outlier_percentile=args.outlier_percentile,
+                analysis_seed=args.analysis_seed,
+            )
     else:
         # Analyze all guided models
         for schedule in args.schedule:
@@ -773,6 +1042,12 @@ def main() -> None:
                 if args.plot_trajectories:
                     plot_trajectories(
                         schedule, model, traj_seed=args.traj_seed,
+                    )
+                if args.plot_analysis:
+                    plot_analysis(
+                        schedule, model,
+                        outlier_percentile=args.outlier_percentile,
+                        analysis_seed=args.analysis_seed,
                     )
 
 
