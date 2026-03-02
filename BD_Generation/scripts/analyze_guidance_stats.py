@@ -639,7 +639,7 @@ def compare_modes(schedules: list[str]) -> None:
 
         # Comparison table header
         print(f"\n  {'Variant':<40} {'Mode':<6} {'ESS_mean':>9} {'ESS_min':>9} "
-              f"{'MaxW_max':>9} {'R_gap':>9} {'\u0394_remask':>9}")
+              f"{'MaxW_max':>9} {'R_gap':>9} {'D_remask':>9}")
         print(f"  {'-'*40} {'-'*6} {'-'*9} {'-'*9} {'-'*9} {'-'*9} {'-'*9}")
 
         for base, mode_dict in sorted(pairs.items()):
