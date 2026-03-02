@@ -211,17 +211,23 @@ Fine α sweep with revised constraints. Combines constraint revision + finer gri
 - **Output**: `comparison_guided_round2.md` + per-config `*_trajectories_outliers.png` / `*_trajectories_clean.png`
 - **Rationale**: Round 1 showed α=0.1 is sweet spot but only tested {0.1, 1.0, 5.0}. Need finer resolution around 0.1 to find optimal. K=24 tests whether more candidates further improves satisfaction beyond K=16.
 
-### Experiment plan (revised post-Round 1)
+### Experiment plan (revised 2026-03-02)
 1. ~~**Round 1 — Coarse sweep** (6 configs)~~: DONE. α=0.1 sweet spot, K=16 > K=4. Old constraint set (included trivially-satisfied `one_living`).
 2. ~~**Constraint set revision**~~: DONE. Replaced `one_living` → `between_2_and_3_bathrooms`.
 3. ~~**Analysis pipeline upgrade**~~: DONE. Outlier-aware `--plot-analysis`.
-4. **Round 2 — Fine α sweep** (8 configs): α ∈ {0.01, 0.05, 0.15, 0.3} × K ∈ {16, 24}. Soft reward, v1 no-remask. Re-calibrate first. Script: `run_g5_pilot.sh all`.
-5. **Expand to other model variants** (if Round 2 is satisfactory):
-   - v1 + confidence remasking (tsw=1.0)
-   - v2 + no remasking
-   - v2 + confidence remasking
-6. Consider: hard reward mode comparison at best α.
-7. **Full evaluation** with `--guidance-config` + `--plot-analysis` → comparison tables + trimmed means + trajectory plots.
+4. ~~**Round 2 — Fine α sweep**~~: SUPERSEDED by K* sweep (Round 2 was too slow at 5000 samples).
+5. **K* sweep — find minimal K for good constraint satisfaction** (16 configs): PENDING.
+   - **Goal**: find K* where satisfaction plateaus (beyond which more candidates don't help much).
+   - **Fixed**: α=0.1, soft reward, v1 loglinear checkpoint.
+   - **Sweep**: K ∈ {4, 8, 10, 12, 14, 16, 20, 24} (8 values).
+   - **Variants**: 2 (no-remasking + confidence remasking tsw=1.0).
+   - **Reduced samples**: 2 seeds (42, 123) × 100 samples = 200 per config. CI ≈ ±6% on satisfaction (vs ±1.2% at 5000). Sufficient to identify the plateau region.
+   - **Runtime estimate**: ~1.5–2h under GPU contention.
+   - **Script**: `run_g5_kstar.sh` (5 steps: calibrate → generate → evaluate → compare → analyze).
+   - **Output**: `comparison_guided_kstar_noremask.md` + `comparison_guided_kstar_confidence.md`.
+   - **Key question**: does remasking shift K* up (fighting guidance → need more candidates) or down (self-correcting → fewer candidates suffice)?
+6. **After K* sweep**: Fine-tune α at the chosen K*, then expand to v2 variants if warranted.
+7. Consider: hard reward mode comparison at best α/K.
 
 ### Files modified
 - `scripts/generate_guided.py` (added `--reward-mode`, `--calibration` CLI overrides)
@@ -234,6 +240,7 @@ Fine α sweep with revised constraints. Combines constraint revision + finer gri
 ### Files created
 - `scripts/run_g5_experiments.sh` (experiment automation, 5 steps — full grid)
 - `scripts/run_g5_pilot.sh` (6-config pilot experiment)
+- `scripts/run_g5_kstar.sh` (K* sweep: K ∈ {4,8,10,12,14,16,20,24} × 2 variants, 200 samples/config)
 - `scripts/analyze_guidance_stats.py` (trajectory diagnostics + soft/hard comparison)
 
 ### Test results
