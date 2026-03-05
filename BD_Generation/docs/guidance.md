@@ -83,7 +83,28 @@ The `reward_mode` parameter controls how each candidate is scored at every denoi
 
 - **Hard mode**: applies argmax on logits to get a single predicted token per masked position, then counts discrete violations on the decoded graph. Binary — a position is either Kitchen or it isn't. More accurate reflection of the final decoded output, but discontinuous (small logit changes can flip the argmax and cause violation jumps).
 
-Both modes produce a reward `r(candidate)` that feeds into the same importance weighting: `w_k = softmax(r / α)`. The α temperature then controls how aggressively those rewards translate into selection pressure. All pilot results below use soft mode.
+Both modes produce a reward `r(candidate)` that feeds into the same importance weighting: `w_k = softmax(r / α)`. The α temperature then controls how aggressively those rewards translate into selection pressure.
+
+#### Why we use soft reward mode (Round 4 finding)
+
+Round 4 compared soft vs hard reward on the no-remasking variant (K=16, α=0.01, 600 samples each). Results:
+
+| Metric | Soft | Hard |
+|--------|------|------|
+| Overall constraint satisfaction | **69.0%** ± 4.1 | 35.0% ± 2.3 |
+| `one_kitchen` satisfaction | **100%** | 97.8% |
+| `kitchen_near_living` satisfaction | **100%** | 97.8% |
+| `no_bath_kitchen` satisfaction | **74.7%** | 70.2% |
+| `between_2_and_3_bathrooms` satisfaction | **93.8%** | 61.3% |
+| Diversity | 90.5% | **98.3%** |
+| Edge TV (↓ better) | 0.565 | **0.363** |
+| Mode coverage (weighted) | 0.412 | **0.630** |
+
+Soft reward mode nearly doubles overall satisfaction (69% vs 35%). The gap is largest on `between_2_and_3_bathrooms` (94% vs 61%), and soft achieves 100% on the two "easy" constraints where hard still fails ~2% of the time.
+
+Hard mode does produce better distributional quality (higher diversity, lower edge TV, better mode coverage), because argmax decoding gives sharper per-candidate scores that preserve more of the model's natural distribution. However, this sharpness is also its weakness for guidance: the reward landscape is spikier and harder for importance reweighting to exploit. Soft mode's smooth probability-based violations provide continuous gradients that guidance steers much more effectively.
+
+**Decision:** all experiments use soft reward mode. The constraint satisfaction advantage is too large to trade for distributional quality gains — satisfying constraints is the primary goal of guidance.
 
 ## Configuration
 

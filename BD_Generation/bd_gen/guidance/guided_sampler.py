@@ -121,10 +121,11 @@ def _score_candidates_soft(
         (rewards, per_constraint_violations) where rewards is (K, B) float64
         and per_constraint_violations is {name: (K, B) float64}.
     """
+    device = candidates.device
     constraint_names = [c.name for c in composer.constraints]
-    rewards = torch.zeros(K, B, dtype=torch.float64)
+    rewards = torch.zeros(K, B, dtype=torch.float64, device=device)
     per_violations: dict[str, Tensor] = {
-        name: torch.zeros(K, B, dtype=torch.float64) for name in constraint_names
+        name: torch.zeros(K, B, dtype=torch.float64, device=device) for name in constraint_names
     }
 
     for k in range(K):
@@ -162,10 +163,11 @@ def _score_candidates_hard(
     Each candidate is hard-decoded to x̂_0, detokenized to graph_dict,
     then scored via hard_violation().
     """
+    device = candidates.device
     constraint_names = [c.name for c in composer.constraints]
-    rewards = torch.zeros(K, B, dtype=torch.float64)
+    rewards = torch.zeros(K, B, dtype=torch.float64, device=device)
     per_violations: dict[str, Tensor] = {
-        name: torch.zeros(K, B, dtype=torch.float64) for name in constraint_names
+        name: torch.zeros(K, B, dtype=torch.float64, device=device) for name in constraint_names
     }
 
     for k in range(K):
