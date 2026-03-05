@@ -10,8 +10,12 @@
 # Grid:  2 variants × 2 reward modes = 4 configs
 #   1. no-remasking  + soft reward
 #   2. no-remasking  + hard reward
-#   3. confidence    + soft reward
-#   4. confidence    + hard reward
+#   3. confidence    + soft reward  + attribution boost (Option C)
+#   4. confidence    + hard reward  + attribution boost (Option C)
+#
+# Note: confidence remasking always uses Option C (attribution boost) because
+# vanilla confidence remasking uses stale model logits that don't account for
+# the guidance reweighting, fighting the guidance signal.
 #
 # Seeds: [42, 123, 456] (3 seeds), 200 samples/seed = 600 per config
 #
@@ -124,11 +128,11 @@ step_generate() {
         run=$((run + 1))
     done
 
-    # --- confidence × {soft, hard} ---
+    # --- confidence × {soft, hard} (always with attribution boost) ---
     for rmode in "${REWARD_MODES[@]}"; do
         local tag="r4${rmode}"
         echo ""
-        echo "--- Run $run/$total: confidence + $rmode reward ---"
+        echo "--- Run $run/$total: confidence + $rmode reward + attribution boost ---"
         echo "    Started: $(date)"
         python scripts/generate_guided.py \
             eval.checkpoint_path="$V1_CKPT" \
@@ -140,6 +144,7 @@ step_generate() {
             --calibration "$CAL_FILE_CONFIDENCE" \
             --alpha "$ALPHA" --K "$K" \
             --reward-mode "$rmode" \
+            --attribution-boost \
             --guidance-tag "$tag"
         echo "    Finished: $(date)"
         run=$((run + 1))
