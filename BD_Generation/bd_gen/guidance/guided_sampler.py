@@ -199,7 +199,7 @@ def _score_single_soft(
     B: int,
 ) -> Tensor:
     """Score B samples in soft mode. Returns (B,) float64 rewards."""
-    rewards = torch.zeros(B, dtype=torch.float64)
+    rewards = torch.zeros(B, dtype=torch.float64, device=x_t.device)
     for b in range(B):
         node_probs, edge_probs = build_effective_probs(
             x_t[b], node_logits[b], edge_logits[b], pad_mask[b], vocab_config,
@@ -221,7 +221,7 @@ def _score_single_hard(
     B: int,
 ) -> Tensor:
     """Score B samples in hard mode. Returns (B,) float64 rewards."""
-    rewards = torch.zeros(B, dtype=torch.float64)
+    rewards = torch.zeros(B, dtype=torch.float64, device=x_t.device)
     for b in range(B):
         x0 = hard_decode_x0(
             x_t[b], node_logits[b], edge_logits[b], pad_mask[b], vocab_config,
