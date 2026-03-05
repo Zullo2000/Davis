@@ -671,7 +671,7 @@ This reveals that **early-step guidance is critical for no-remasking**: if the w
 | Outlier cause | Early topology lock-in (`no_bath_kitchen` stuck) | High variance regime, poor final-step luck |
 | Averaged tables vs reality | Smooth increase is an artifact of bimodal ESS | Smooth U-shape is an artifact of averaging chaos |
 
-### Reward-Attributed Confidence Boosting (Option C)
+### Option C — Reward-Attributed Confidence Boosting
 
 > Status: **implemented** in `bd_gen/guidance/guided_sampler.py` (`_compute_attribution_boost` helper + integration in the SVDD loop). Enable via `attribution_boost=True` in `guided_sample()` or `--attribution-boost` CLI flag in `scripts/generate_guided.py`. Only effective when confidence remasking is active.
 
@@ -756,3 +756,191 @@ So $\text{conf}_{\text{eff}}^4 = 0.35 + 0.52 = 0.87$ — comparable to committed
 - **No hyperparameter sweep.** The only constant ($K_0 = 4$) is a combinatorial fact about minimum group sizes.
 - **Graceful degradation at low K.** The trust ramp ensures noisy attributions from small K are attenuated rather than amplified.
 - **Compatible with Option B** (protect all just-unmasked positions for 1 step). Option B is a blunt safety net; Option C adds surgical precision on top.
+
+### Round 4 — Remasking × Reward-mode grid at K=16, α=0.01 (2026-03-05)
+
+#### Motivation
+
+Round 3 established α=0.01 as optimal for no-remasking (69% satisfaction) and showed confidence remasking fighting guidance at 98/100 steps. Option C (Reward-Attributed Confidence Boosting) was implemented to mitigate this conflict by boosting effective confidence of reward-aligned positions before remasking. Round 4 tests whether Option C rescues confidence remasking, and also whether hard reward mode (argmax-decoded scoring) outperforms soft reward mode (probability-based scoring).
+
+#### Setup
+
+- **Fixed**: K=16, α=0.01, v1 loglinear checkpoint, revised 4-constraint set, Option C (RACB) enabled for confidence configs
+- **Grid**: {no-remasking, confidence+RACB} × {soft reward, hard reward} = 4 configs
+- **Samples**: 3 seeds (42, 123, 456) × 200 samples = 600 per config
+- **Tags**: `r4soft` / `r4hard` to differentiate reward modes
+- **Script**: `run_g5_round4.sh`
+
+#### Results — Satisfaction (all)
+
+| Remasking | Soft reward | Hard reward |
+|-----------|-----------|-----------|
+| No-remasking | **69%** | 35% |
+| Confidence + RACB | 56% | 36% |
+
+#### Per-constraint breakdown
+
+| Config | one_kitchen | kitchen_near_living | no_bath_kitchen | between_2_3_bath |
+|--------|------------|-------------------|----------------|-----------------|
+| no-remask soft | 100% | 100% | 74.7% | 93.0% |
+| no-remask hard | ~97% | ~97% | ~50% | ~73% |
+| confidence+RACB soft | ~98% | ~99% | ~79% | ~78% |
+| confidence+RACB hard | ~96% | ~97% | ~54% | ~72% |
+
+#### Findings
+
+1. **Option C (RACB) failed to rescue confidence remasking.** Overall satisfaction dropped from 69% (no-remask) to 56% (confidence+RACB), a 13pp regression. The confidence boost was insufficient to prevent the guidance-remasking conflict.
+
+2. **Soft reward mode dominates hard reward mode.** Consistent ~20pp gap: 69% vs 35% (no-remask), 56% vs 36% (confidence+RACB). Hard reward mode collapses because argmax decoding at intermediate steps produces noisy, discrete scores that don't differentiate candidates well. Soft mode uses the full posterior distribution, providing smoother gradients for the importance weights.
+
+3. **ForbidAdj is worst case for Option C.** The `no_bath_kitchen` constraint actually improved slightly with RACB (+2.3pp vs the un-boosted confidence baseline from Round 3), but `between_2_and_3_bathrooms` degraded (-15pp vs no-remask). The net effect was negative because RACB's boost wasn't strong enough to prevent remasking of guided positions.
+
+#### Why Option C failed — mechanism analysis
+
+The root cause is that **additive confidence boosting before `softmax(-confidence)` gets washed out by softmax normalization**.
+
+The remasking probability for position $l$ is:
+
+$$p_{\text{remask}}^l = \frac{\exp(-\text{conf}_{\text{eff}}^l)}{\sum_j \exp(-\text{conf}_{\text{eff}}^j)}$$
+
+Adding a boost $\Delta$ to position $l$'s confidence reduces its numerator by a factor of $\exp(-\Delta)$, but the **denominator** (sum over all positions) barely changes because the boost only applies to the few just-unmasked positions in $\mathcal{U}_t$. For a typical sequence of 120 positions where $|\mathcal{U}_t| \approx 2$–5, boosting 2–5 positions leaves 115+ positions unchanged. The remasking probability for the boosted position decreases, but not to zero — it is merely *reduced*, not eliminated.
+
+The trajectory diagnostics confirm undamped oscillation:
+- **Remasking delta**: oscillates wildly between -2 and +1 (soft) / -3 and +2 (hard) across all 100 steps, never narrowing
+- **ESS**: spikes to K (degenerate) intermittently — same chaotic pattern as un-boosted confidence
+- **Per-constraint violations**: never converge; constraints flip between satisfied and violated throughout denoising
+- **Reward trajectory**: chaotic, non-monotonic — no sustained improvement
+
+In contrast, the no-remasking baseline shows monotonic reward improvement, clean ESS phase transition, and permanent constraint resolution.
+
+#### Verdict
+
+**Option C is insufficient as a standalone mitigation.** The additive boost mechanism cannot prevent remasking of guided positions — it can only reduce the probability. Because remasking happens at every step (98/100 steps show negative delta), even a small probability of remasking a guided position compounds over 100 steps into near-certain destruction of guidance gains.
+
+**Soft reward mode is confirmed as the only viable scoring approach.** Hard reward mode should not be used.
+
+**No-remasking at α=0.01, K=16 remains the best configuration** at 69% overall satisfaction. To improve further, either:
+- **(a) Option B** — protect just-unmasked positions from remasking for 1 step (zero cost, directly breaks the same-step feedback loop)
+- **(b) Option B+C** — combine protection with surgical boosting for multi-step protection
+- **(c) Accept no-remasking** as the production configuration and move to v2 variants
+
+### Option B — Protect Just-Unmasked Positions
+
+> Status: **implemented** in `bd_gen/guidance/guided_sampler.py` and `bd_gen/diffusion/remasking.py`. Enable via `protect_just_unmasked=True` in `guided_sample()` or `--protect-just-unmasked` CLI flag.
+
+#### Problem
+
+At each denoising step, SVDD selects a winner from K candidates, placing tokens at just-unmasked positions. Confidence remasking then immediately evaluates these freshly placed tokens using logits from the *pre-unmask* state — logits that don't account for the new token context. This same-step feedback loop means guided tokens are evaluated with stale confidence and systematically remasked.
+
+#### Mechanism
+
+After SVDD selects the winning candidate at step $t$:
+
+1. **Identify just-unmasked positions**: $\mathcal{P}_t = \{l : \text{was MASK before step } t, \text{now decoded}\}$
+2. **Exclude from remasking candidates**: Pass `protect_mask` to the remasking schedule. Positions in $\mathcal{P}_t$ are excluded from the candidate set for this step only — they become eligible for remasking at step $t+1$.
+
+This directly breaks the same-step feedback loop: positions placed by guidance cannot be immediately undone by remasking using stale confidence values.
+
+#### Properties
+
+- **Zero cost.** No extra model calls, no extra computation beyond a boolean mask comparison.
+- **No hyperparameters.** Binary: either protect for 1 step or don't.
+- **Strategy-agnostic.** Works with cap, rescale, and confidence remasking strategies.
+- **Composable.** Orthogonal to Option A (fresh logits) and Option C (confidence boosting). Can be combined with either or both.
+- **Conservative.** Only prevents same-step remasking. If a position is truly wrong, it will be remasked at the next step when confidence is computed from the updated context.
+
+#### CLI usage
+
+```bash
+python scripts/generate_guided.py \
+    eval.checkpoint_path=path/to/ckpt.pt \
+    --guidance-config configs/guidance/example.yaml \
+    --protect-just-unmasked
+```
+
+### Option A — Fresh Logits for Remasking
+
+> Status: **implemented** in `bd_gen/guidance/guided_sampler.py`. Enable via `fresh_logits_for_remask=True` in `guided_sample()` or `--fresh-logits-remask` CLI flag.
+
+#### Problem
+
+Confidence remasking computes per-position confidence from model logits. In the standard pipeline, these logits come from the model call *before* unmasking — they reflect the pre-transition state. After SVDD selects a winner and places new tokens, the context has changed, but confidence values are stale. This mismatch causes remasking to poorly target truly incorrect positions.
+
+#### Mechanism
+
+After SVDD selects the winning candidate at step $t$:
+
+1. **Re-run the model** on the post-unmask winner: `fresh_logits = model(x_t_winner, pad_mask, t)`
+2. **Use fresh logits** for the remasking decision instead of the stale pre-unmask logits.
+
+The fresh logits reflect the actual post-transition context, so confidence values are accurate. Positions the model is genuinely uncertain about (given the current context) are remasked; positions that are confident in context — including those placed by guidance — are more likely to be preserved.
+
+#### Properties
+
+- **2× model cost per guided step.** One call for SVDD candidate generation, one for fresh logits before remasking. This doubles the neural network inference cost.
+- **No hyperparameters.** The fresh logits are used as-is; no tuning needed.
+- **Gold standard for confidence accuracy.** The remasking decision uses the most up-to-date information available.
+- **Strategy-agnostic.** Works with any remasking strategy that uses logits (confidence, and potentially future strategies).
+- **Composable.** Orthogonal to Option B (protect mask) and Option C (confidence boosting). Can be combined with either or both.
+
+#### CLI usage
+
+```bash
+python scripts/generate_guided.py \
+    eval.checkpoint_path=path/to/ckpt.pt \
+    --guidance-config configs/guidance/example.yaml \
+    --fresh-logits-remask
+```
+
+### Combining Options A, B, and C
+
+All three remasking mitigation options are orthogonal and can be combined:
+
+| Option | What it changes | Cost | CLI flag |
+|---|---|---|---|
+| A (Fresh logits) | Which logits remasking uses | 2× model calls | `--fresh-logits-remask` |
+| B (Protect mask) | Which positions are eligible for remasking | Zero | `--protect-just-unmasked` |
+| C (RACB) | Confidence scores used for remasking | Negligible | `--attribution-boost` |
+
+Possible combinations for Round 5 experiments:
+- **B alone**: Zero cost, breaks same-step feedback loop
+- **A alone**: 2× cost, gold standard confidence accuracy
+- **B+C**: Zero cost protection + surgical boosting
+- **A+B**: Fresh logits + same-step protection (should be strongest)
+- **A+B+C**: All three (maximum protection, 2× cost)
+
+### Round 5 — Option A vs Option B at K=16, α=0.01 (2026-03-05)
+
+#### Motivation
+
+Round 4 showed that Option C (RACB) alone is insufficient to rescue confidence remasking: 56% overall satisfaction vs 69% for no-remasking. The additive confidence boost gets washed out by softmax normalization, and the guidance-remasking conflict persists at 98/100 steps.
+
+Round 5 tests the two remaining mitigation options individually:
+- **Option A** (fresh logits): Re-run the model on the post-unmask winner to get accurate confidence values for remasking. 2× model cost per step.
+- **Option B** (protect just-unmasked): Exclude just-unmasked positions from remasking for 1 step. Zero cost.
+
+Both use confidence remasking + soft reward (hard reward was conclusively ruled out in Round 4).
+
+#### Setup
+
+- **Fixed**: K=16, α=0.01, v1 loglinear checkpoint, revised 4-constraint set, soft reward only
+- **Grid**: 2 configs (confidence + Option A, confidence + Option B)
+- **Samples**: 3 seeds (42, 123, 456) × 200 samples = 600 per config
+- **Tags**: `r5optA` / `r5optB`
+- **Script**: `run_g5_round5.sh`
+
+#### Comparison targets (from Round 4, not re-generated)
+
+| Config | Overall satisfaction | Source |
+|--------|---------------------|--------|
+| No-remasking + soft | 69% | Round 4 |
+| Confidence + Option C + soft | 56% | Round 4 |
+
+#### Expected outcomes
+
+- **Option B**: Should break the same-step feedback loop (protect guided tokens for 1 step). If the conflict is primarily same-step, this should close most of the gap to no-remasking. If multi-step compounding dominates, improvement will be modest.
+- **Option A**: Gold standard — fresh logits give the model a chance to evaluate guided tokens in context. Should be the strongest mitigation, but at 2× cost. Provides an upper bound on what informed remasking can achieve.
+
+#### Results
+
+> Pending — run `bash scripts/run_g5_round5.sh all` on jabiru.

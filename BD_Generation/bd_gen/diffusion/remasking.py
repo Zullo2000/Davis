@@ -165,6 +165,7 @@ class RemaskingSchedule:
         node_logits: Tensor | None = None,
         edge_logits: Tensor | None = None,
         confidence_boost: Tensor | None = None,
+        protect_mask: Tensor | None = None,
     ) -> Tensor:
         """Apply stochastic remasking to already-decoded positions.
 
@@ -180,6 +181,9 @@ class RemaskingSchedule:
             confidence_boost: (B, SEQ_LEN) float tensor of additive confidence
                 boosts from reward attribution. Only used by confidence
                 strategy. None = no boost (default).
+            protect_mask: (B, SEQ_LEN) bool tensor of positions to exclude
+                from remasking candidates (Option B). True = protected.
+                None = no protection (default).
 
         Returns:
             (B, SEQ_LEN) long tensor with some positions re-masked.
@@ -198,6 +202,10 @@ class RemaskingSchedule:
 
         # Remask candidates: non-MASK AND non-PAD (never remask PAD)
         remask_candidates = (~is_mask) & pad_mask
+
+        # Option B: exclude protected positions from remasking
+        if protect_mask is not None:
+            remask_candidates = remask_candidates & ~protect_mask
 
         if self.strategy == "confidence":
             should_remask = self._confidence_remasking(

@@ -10,12 +10,12 @@
 # Grid:  2 variants × 2 reward modes = 4 configs
 #   1. no-remasking  + soft reward
 #   2. no-remasking  + hard reward
-#   3. confidence    + soft reward  + Reward-Attributed Confidence Boosting
-#   4. confidence    + hard reward  + Reward-Attributed Confidence Boosting
+#   3. confidence    + soft reward  + Option C (RACB)
+#   4. confidence    + hard reward  + Option C (RACB)
 #
-# Note: confidence remasking always uses Reward-Attributed Confidence Boosting
-# because vanilla confidence remasking uses stale model logits that don't
-# account for the guidance reweighting, fighting the guidance signal.
+# Note: confidence remasking always uses Option C (Reward-Attributed
+# Confidence Boosting) because vanilla confidence remasking uses stale model
+# logits that don't account for the guidance reweighting, fighting the signal.
 #
 # Seeds: [42, 123, 456] (3 seeds), 200 samples/seed = 600 per config
 #
@@ -128,7 +128,7 @@ step_generate() {
         run=$((run + 1))
     done
 
-    # --- confidence × {soft, hard} (with Reward-Attributed Confidence Boosting) ---
+    # --- confidence × {soft, hard} (with Option C / RACB) ---
     for rmode in "${REWARD_MODES[@]}"; do
         local tag="r4${rmode}"
         echo ""

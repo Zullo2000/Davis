@@ -7,7 +7,7 @@
 
 
 ## Overall Status
-- Current phase: G5 IN PROGRESS (K* sweep complete, next: α fine-tuning at chosen K*)
+- Current phase: G5 IN PROGRESS (Round 5: Option A vs Option B mitigation comparison)
 - Dependencies: v1 pipeline complete, v2 (MELD) trained and evaluated
 
 ### Dependency Graph
@@ -225,14 +225,19 @@ Fine α sweep with revised constraints. Combines constraint revision + finer gri
 6. ~~**Round 3 — α fine-tuning at K=16**~~: DONE (script: `run_g5_alpha.sh`).
    - Swept α ∈ {0.01, 0.05, 0.1, 0.15, 0.3, 0.5} at K=16 for both no-remask and confidence variants.
    - 3 seeds × 200 samples = 600 per config.
-7. **Round 4 — Remasking × Reward-mode at K=16, α=0.01**: IN PROGRESS.
-   - Tests new remasking implementation + hard vs soft reward mode.
-   - Grid: {no-remask, confidence} × {soft, hard} = 4 configs.
-   - Tags: `r4soft` / `r4hard` to differentiate in method names.
+7. ~~**Round 4 — Remasking × Reward-mode at K=16, α=0.01**~~: DONE (2026-03-05).
+   - **Result**: Option C (RACB) failed to rescue confidence remasking (56% vs 69% no-remask).
+   - Hard reward mode conclusively bad (~35%). Soft reward only going forward.
+   - Script: `run_g5_round4.sh`. Output: `comparison_guided_round4.md`.
+8. **Round 5 — Option A vs Option B at K=16, α=0.01**: IN PROGRESS.
+   - Tests remaining remasking mitigations: Option A (fresh logits, 2× cost) and Option B (protect just-unmasked, zero cost).
+   - Grid: 2 configs (confidence + Option A, confidence + Option B), soft reward only.
+   - Tags: `r5optA` / `r5optB`.
    - 3 seeds (42, 123, 456) × 200 samples = 600 per config.
-   - Script: `run_g5_round4.sh` (5 steps: calibrate → generate → evaluate → compare → analyze).
-   - Output: `comparison_guided_round4.md` + per-config trajectory plots.
-8. Expand to v2 variants if warranted.
+   - Comparison targets: no-remask soft (69%), confidence + Option C soft (56%).
+   - Script: `run_g5_round5.sh` (5 steps: calibrate → generate → evaluate → compare → analyze).
+   - Output: `comparison_guided_round5.md` + per-config trajectory plots.
+9. Expand to v2 variants if warranted.
 
 ### Option C — Reward-Attributed Confidence Boosting (2026-03-05)
 Implemented the mitigation for the guidance-remasking conflict: confidence remasking destroys guided positions (low model confidence = high attribution). Option C boosts confidence of reward-aligned just-unmasked positions before remasking.
@@ -261,6 +266,19 @@ Implemented the mitigation for the guidance-remasking conflict: confidence remas
 - **No regressions**
 
 **Backward compatibility:** All changes additive with safe defaults. Feature is opt-in via `attribution_boost=True` / `--attribution-boost`.
+
+### Round 5 — Option A vs Option B setup (2026-03-05)
+Renamed "Reward-Attributed Confidence Boosting" back to "Option C" throughout docs (headings in `docs/guidance.md`, comments in `run_g5_round4.sh`) since Options A and B are now also in scope.
+
+**Round 5 experiment**: Tests Option A (fresh logits) and Option B (protect just-unmasked) individually with confidence remasking + soft reward at K=16, α=0.01. Compares against Round 4 baselines (no-remask 69%, confidence+C 56%).
+
+**Files created:**
+- `scripts/run_g5_round5.sh` — 2-config experiment script (calibrate → generate → evaluate → compare → analyze)
+
+**Files modified:**
+- `docs/guidance.md` — headings renamed to `Option X — Description` pattern; added Round 5 section with motivation, setup, and expected outcomes
+- `scripts/run_g5_round4.sh` — comments updated to use "Option C" label
+- `implementation_state_T1_guidance.md` — Round 4 marked DONE, Round 5 added to experiment plan
 
 ### Files modified
 - `scripts/generate_guided.py` (added `--reward-mode`, `--calibration` CLI overrides)

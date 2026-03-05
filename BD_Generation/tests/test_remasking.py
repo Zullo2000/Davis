@@ -1199,3 +1199,108 @@ class TestConfidenceBoost:
             assert torch.equal(r_none, r_zero), (
                 f"seed {seed}: zero boost should give identical results to None"
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests: protect_mask (Option B)
+# ---------------------------------------------------------------------------
+
+
+class TestProtectMask:
+    """Verify that protect_mask excludes positions from remasking."""
+
+    def test_protect_mask_excludes_positions(self, linear_schedule, vocab_config):
+        """Positions with protect_mask=True must never be remasked."""
+        vc = vocab_config
+        B = 4
+        # All positions decoded (no MASK), all real (no PAD)
+        x_t = torch.zeros(B, vc.seq_len, dtype=torch.long)
+        pad_mask = torch.ones(B, vc.seq_len, dtype=torch.bool)
+        for k in range(vc.n_max):
+            x_t[:, k] = k % 10
+        for pos in range(vc.n_edges):
+            x_t[:, vc.n_max + pos] = pos % 10
+
+        # Protect first 4 node positions and first 4 edge positions
+        protect = torch.zeros(B, vc.seq_len, dtype=torch.bool)
+        protect[:, :4] = True
+        protect[:, vc.n_max: vc.n_max + 4] = True
+
+        # Use high-eta cap strategy to maximize remasking probability
+        rs = RemaskingSchedule("cap", 1.0, linear_schedule, vc)
+
+        for seed in range(50):
+            torch.manual_seed(seed)
+            result = rs(
+                x_t.clone(), t_now=0.9, t_next=0.1, pad_mask=pad_mask,
+                protect_mask=protect,
+            )
+            # Protected positions must retain their original values
+            assert torch.equal(result[:, :4], x_t[:, :4]), (
+                f"seed {seed}: protected node positions were remasked"
+            )
+            assert torch.equal(
+                result[:, vc.n_max: vc.n_max + 4],
+                x_t[:, vc.n_max: vc.n_max + 4],
+            ), f"seed {seed}: protected edge positions were remasked"
+
+    def test_protect_mask_none_is_noop(self, linear_schedule, vocab_config):
+        """protect_mask=None should produce identical results to no protection."""
+        vc = vocab_config
+        B = 4
+        x_t = torch.zeros(B, vc.seq_len, dtype=torch.long)
+        pad_mask = torch.ones(B, vc.seq_len, dtype=torch.bool)
+        for k in range(vc.n_max):
+            x_t[:, k] = k % 10
+        for pos in range(vc.n_edges):
+            x_t[:, vc.n_max + pos] = pos % 10
+
+        rs = RemaskingSchedule("cap", 0.3, linear_schedule, vc)
+
+        for seed in range(30):
+            torch.manual_seed(seed)
+            r_none = rs(
+                x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
+                protect_mask=None,
+            )
+            torch.manual_seed(seed)
+            r_false = rs(
+                x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
+                protect_mask=torch.zeros(B, vc.seq_len, dtype=torch.bool),
+            )
+            assert torch.equal(r_none, r_false), (
+                f"seed {seed}: protect_mask=None should match all-False mask"
+            )
+
+    def test_protect_mask_with_confidence(self, linear_schedule, vocab_config):
+        """protect_mask works with confidence strategy too."""
+        vc = vocab_config
+        B = 4
+        x_t = torch.zeros(B, vc.seq_len, dtype=torch.long)
+        pad_mask = torch.ones(B, vc.seq_len, dtype=torch.bool)
+        for k in range(vc.n_max):
+            x_t[:, k] = k % 10
+        for pos in range(vc.n_edges):
+            x_t[:, vc.n_max + pos] = pos % 10
+
+        node_logits = torch.randn(B, vc.n_max, NODE_VOCAB_SIZE)
+        edge_logits = torch.randn(B, vc.n_edges, EDGE_VOCAB_SIZE)
+
+        # Protect all node positions
+        protect = torch.zeros(B, vc.seq_len, dtype=torch.bool)
+        protect[:, :vc.n_max] = True
+
+        rs = RemaskingSchedule("confidence", 0.0, linear_schedule, vc)
+
+        for seed in range(30):
+            torch.manual_seed(seed)
+            result = rs(
+                x_t.clone(), t_now=0.9, t_next=0.1, pad_mask=pad_mask,
+                node_logits=node_logits, edge_logits=edge_logits,
+                protect_mask=protect,
+            )
+            # All node positions must be unchanged
+            assert torch.equal(result[:, :vc.n_max], x_t[:, :vc.n_max]), (
+                f"seed {seed}: protected node positions were remasked "
+                "under confidence strategy"
+            )

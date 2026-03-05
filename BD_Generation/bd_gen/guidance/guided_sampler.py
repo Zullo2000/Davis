@@ -61,6 +61,7 @@ class GuidanceStatsStep(TypedDict):
     reward_post_remask: float
     reward_remasking_delta: float
     positions_remasked: float
+    positions_protected: float
     violations: dict[str, float]
     mean_attribution_boost: float
     positions_boosted: float
@@ -332,6 +333,8 @@ def guided_sample(
     fixed_mask: Tensor | None = None,
     remasking_fn: Callable | None = None,
     attribution_boost: bool = False,
+    protect_just_unmasked: bool = False,
+    fresh_logits_for_remask: bool = False,
     rate_network: torch.nn.Module | None = None,
     num_rooms_distribution: Tensor | None = None,
     fixed_num_rooms: int | None = None,
@@ -368,7 +371,15 @@ def guided_sample(
         remasking_fn: Optional ReMDM remasking function.
         attribution_boost: If True and remasking_fn is not None, compute
             per-position reward attribution and boost confidence of
-            reward-aligned just-unmasked positions before remasking.
+            reward-aligned just-unmasked positions before remasking
+            (Option C).
+        protect_just_unmasked: If True and remasking_fn is not None,
+            exclude just-unmasked positions from the remasking candidate
+            set for 1 step (Option B). Zero cost.
+        fresh_logits_for_remask: If True and remasking_fn is not None,
+            run the model a second time on the post-unmask winner and use
+            fresh logits for the remasking decision (Option A). 2x model
+            cost per step.
         rate_network: Optional v2 rate network.
         num_rooms_distribution: Room count distribution.
         fixed_num_rooms: Fixed room count.
@@ -444,8 +455,8 @@ def guided_sample(
             p_unmask = torch.clamp(p_unmask, min=0.0, max=1.0).float()
             p_unmask = p_unmask.unsqueeze(1)  # (B, 1)
 
-        # Save pre-unmask state for attribution boost (Option C)
-        if attribution_boost and remasking_fn is not None:
+        # Save pre-unmask state for Option B (protect) and/or Option C (boost)
+        if (attribution_boost or protect_just_unmasked) and remasking_fn is not None:
             x_t_pre_unmask = x_t.clone()
 
         # 4c. Expand to K*B candidates
@@ -515,23 +526,44 @@ def guided_sample(
                 candidates, rewards, selected_k, x_t_pre_unmask, n_max,
             )
 
+        # 4i-pre. Compute protect mask (Option B)
+        prot_mask = None
+        if protect_just_unmasked and remasking_fn is not None and i > 0 and t_now < t_switch:
+            is_mask_pre_node = x_t_pre_unmask[:, :n_max] == NODE_MASK_IDX
+            is_mask_pre_edge = x_t_pre_unmask[:, n_max:] == EDGE_MASK_IDX
+            is_mask_pre = torch.cat([is_mask_pre_node, is_mask_pre_edge], dim=1)
+            is_mask_post_node = x_t[:, :n_max] == NODE_MASK_IDX
+            is_mask_post_edge = x_t[:, n_max:] == EDGE_MASK_IDX
+            is_mask_post = torch.cat([is_mask_post_node, is_mask_post_edge], dim=1)
+            prot_mask = is_mask_pre & ~is_mask_post  # just-unmasked positions
+
+        # 4i-pre. Fresh logits for remasking (Option A)
+        if fresh_logits_for_remask and remasking_fn is not None and i > 0 and t_now < t_switch:
+            fresh_node_logits, fresh_edge_logits = model(x_t, pad_mask, t_tensor)
+            remask_node_logits = fresh_node_logits
+            remask_edge_logits = fresh_edge_logits
+        else:
+            remask_node_logits = node_logits
+            remask_edge_logits = edge_logits
+
         # 4i. Remask winner only
         x_t = _single_step_remask(
             x_t, remasking_fn, t_now, t_next, t_switch, i,
-            pad_mask, node_logits, edge_logits,
+            pad_mask, remask_node_logits, remask_edge_logits,
             confidence_boost=conf_boost,
+            protect_mask=prot_mask,
         )
 
-        # 4j. Compute post-remask reward
+        # 4j. Compute post-remask reward (use remask logits for consistency)
         if remasking_fn is not None and i > 0 and t_now < t_switch:
             if reward_mode == "soft":
                 reward_post = _score_single_soft(
-                    x_t, node_logits, edge_logits, pad_mask,
+                    x_t, remask_node_logits, remask_edge_logits, pad_mask,
                     vocab_config, reward_composer, B,
                 )
             else:
                 reward_post = _score_single_hard(
-                    x_t, node_logits, edge_logits, pad_mask,
+                    x_t, remask_node_logits, remask_edge_logits, pad_mask,
                     vocab_config, reward_composer, B,
                 )
         else:
@@ -583,6 +615,9 @@ def guided_sample(
             mean_boost = 0.0
             n_boosted = 0.0
 
+        # Protect mask diagnostics (Option B)
+        n_protected = prot_mask.float().sum(dim=1).mean().item() if prot_mask is not None else 0.0
+
         step_stats = GuidanceStatsStep(
             ess=ess_per_sample.mean().item(),
             max_weight=max_w_per_sample.mean().item(),
@@ -594,6 +629,7 @@ def guided_sample(
             reward_post_remask=reward_post.mean().item(),
             reward_remasking_delta=(reward_post - reward_pre).mean().item(),
             positions_remasked=positions_remasked.mean().item(),
+            positions_protected=n_protected,
             violations=violations_selected,
             mean_attribution_boost=mean_boost,
             positions_boosted=n_boosted,

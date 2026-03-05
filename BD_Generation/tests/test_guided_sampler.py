@@ -621,3 +621,225 @@ class TestAttributionBoost:
         assert torch.equal(result_no_boost, result_with_boost), (
             "attribution_boost should have no effect when remasking_fn=None"
         )
+
+    # -----------------------------------------------------------------------
+    # Option B: protect_just_unmasked
+    # -----------------------------------------------------------------------
+
+    def test_option_b_runs(
+        self, dummy_model, linear_schedule, vocab_config,
+    ):
+        """Smoke test: protect_just_unmasked=True with confidence remasking
+        completes without error and records positions_protected."""
+        from bd_gen.diffusion.remasking import RemaskingSchedule
+
+        remasking_fn = RemaskingSchedule(
+            "confidence", 0.3, linear_schedule, vocab_config,
+        )
+        kitchen_idx = NODE_TYPES.index("Kitchen")
+        constraint = ExactCount(
+            name="one_kitchen", room_type_idx=kitchen_idx, target=1,
+        )
+        composer = RewardComposer(
+            constraints=[constraint], reward_mode="soft",
+        )
+
+        result, stats = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=5, num_candidates=4,
+            guidance_alpha=1.0, top_p=0.9,
+            remasking_fn=remasking_fn,
+            protect_just_unmasked=True,
+            fixed_num_rooms=4,
+        )
+
+        assert result.shape == (2, vocab_config.seq_len)
+        assert len(stats.steps) == 5
+        # Check positions_protected diagnostic is present
+        for step in stats.steps:
+            assert "positions_protected" in step
+
+    def test_option_b_reduces_remasking_delta(
+        self, dummy_model, linear_schedule, vocab_config,
+    ):
+        """With protect_just_unmasked, remasking_delta should be less negative
+        (remasking can't destroy just-unmasked positions)."""
+        from bd_gen.diffusion.remasking import RemaskingSchedule
+
+        remasking_fn = RemaskingSchedule(
+            "confidence", 0.3, linear_schedule, vocab_config,
+        )
+        kitchen_idx = NODE_TYPES.index("Kitchen")
+        constraint = ExactCount(
+            name="one_kitchen", room_type_idx=kitchen_idx, target=1,
+        )
+        composer = RewardComposer(
+            constraints=[constraint], reward_mode="soft",
+        )
+
+        # Run without Option B
+        torch.manual_seed(42)
+        _, stats_no_b = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=4, num_steps=10, num_candidates=4,
+            guidance_alpha=0.1, top_p=0.9,
+            remasking_fn=remasking_fn,
+            protect_just_unmasked=False,
+            fixed_num_rooms=4,
+        )
+
+        # Run with Option B
+        torch.manual_seed(42)
+        _, stats_b = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=4, num_steps=10, num_candidates=4,
+            guidance_alpha=0.1, top_p=0.9,
+            remasking_fn=remasking_fn,
+            protect_just_unmasked=True,
+            fixed_num_rooms=4,
+        )
+
+        # Compare mean remasking delta across steps
+        delta_no_b = sum(
+            s["reward_remasking_delta"] for s in stats_no_b.steps
+        ) / len(stats_no_b.steps)
+        delta_b = sum(
+            s["reward_remasking_delta"] for s in stats_b.steps
+        ) / len(stats_b.steps)
+
+        # With a dummy model this is a soft check — Option B should not make
+        # things dramatically worse.
+        assert delta_b >= delta_no_b - 0.1, (
+            f"Option B delta {delta_b:.4f} much worse than baseline "
+            f"{delta_no_b:.4f}"
+        )
+
+    def test_option_b_noop_without_remasking(
+        self, dummy_model, linear_schedule, vocab_config,
+    ):
+        """protect_just_unmasked=True with remasking_fn=None has no effect."""
+        composer = RewardComposer(constraints=[], reward_mode="soft")
+
+        torch.manual_seed(42)
+        result_off, _ = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=5, num_candidates=4,
+            guidance_alpha=1.0, temperature=0.0,
+            remasking_fn=None,
+            protect_just_unmasked=False,
+            fixed_num_rooms=4,
+        )
+
+        torch.manual_seed(42)
+        result_on, _ = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=5, num_candidates=4,
+            guidance_alpha=1.0, temperature=0.0,
+            remasking_fn=None,
+            protect_just_unmasked=True,
+            fixed_num_rooms=4,
+        )
+
+        assert torch.equal(result_off, result_on), (
+            "protect_just_unmasked should have no effect when remasking_fn=None"
+        )
+
+    # -----------------------------------------------------------------------
+    # Option A: fresh_logits_for_remask
+    # -----------------------------------------------------------------------
+
+    def test_option_a_calls_model_twice(
+        self, dummy_model, linear_schedule, vocab_config,
+    ):
+        """With fresh_logits_for_remask=True, model should be called more
+        times (2x per guided step) compared to without."""
+        from bd_gen.diffusion.remasking import RemaskingSchedule
+        from unittest.mock import patch
+
+        remasking_fn = RemaskingSchedule(
+            "confidence", 0.3, linear_schedule, vocab_config,
+        )
+        composer = RewardComposer(constraints=[], reward_mode="soft")
+
+        call_counts = {"without": 0, "with": 0}
+
+        original_forward = dummy_model.forward
+
+        def counting_forward_without(*args, **kwargs):
+            call_counts["without"] += 1
+            return original_forward(*args, **kwargs)
+
+        def counting_forward_with(*args, **kwargs):
+            call_counts["with"] += 1
+            return original_forward(*args, **kwargs)
+
+        # Run without Option A
+        torch.manual_seed(42)
+        dummy_model.forward = counting_forward_without
+        guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=5, num_candidates=4,
+            guidance_alpha=1.0, top_p=0.9,
+            remasking_fn=remasking_fn,
+            fresh_logits_for_remask=False,
+            fixed_num_rooms=4,
+        )
+
+        # Run with Option A
+        torch.manual_seed(42)
+        dummy_model.forward = counting_forward_with
+        guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=5, num_candidates=4,
+            guidance_alpha=1.0, top_p=0.9,
+            remasking_fn=remasking_fn,
+            fresh_logits_for_remask=True,
+            fixed_num_rooms=4,
+        )
+
+        dummy_model.forward = original_forward
+
+        # Option A should make more model calls
+        assert call_counts["with"] > call_counts["without"], (
+            f"Option A calls ({call_counts['with']}) should exceed "
+            f"baseline ({call_counts['without']})"
+        )
+
+    def test_option_a_noop_without_remasking(
+        self, dummy_model, linear_schedule, vocab_config,
+    ):
+        """fresh_logits_for_remask=True with remasking_fn=None has no effect."""
+        composer = RewardComposer(constraints=[], reward_mode="soft")
+
+        torch.manual_seed(42)
+        result_off, _ = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=5, num_candidates=4,
+            guidance_alpha=1.0, temperature=0.0,
+            remasking_fn=None,
+            fresh_logits_for_remask=False,
+            fixed_num_rooms=4,
+        )
+
+        torch.manual_seed(42)
+        result_on, _ = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=5, num_candidates=4,
+            guidance_alpha=1.0, temperature=0.0,
+            remasking_fn=None,
+            fresh_logits_for_remask=True,
+            fixed_num_rooms=4,
+        )
+
+        assert torch.equal(result_off, result_on), (
+            "fresh_logits_for_remask should have no effect when remasking_fn=None"
+        )

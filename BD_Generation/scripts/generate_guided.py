@@ -194,6 +194,16 @@ def _parse_guidance_args() -> tuple[argparse.Namespace, list[str]]:
         help="Enable reward-attributed confidence boosting (Option C). "
              "Only effective with confidence remasking.",
     )
+    parser.add_argument(
+        "--protect-just-unmasked", action="store_true", default=False,
+        help="Protect just-unmasked positions from remasking for 1 step "
+             "(Option B). Zero cost, prevents same-step feedback loop.",
+    )
+    parser.add_argument(
+        "--fresh-logits-remask", action="store_true", default=False,
+        help="Re-run model on post-unmask winner to get fresh logits for "
+             "remasking (Option A). 2x model cost per guided step.",
+    )
 
     guidance_args, remaining = parser.parse_known_args()
     return guidance_args, remaining
@@ -298,6 +308,10 @@ def generate_guided_samples(
         )
         if guidance_args.attribution_boost:
             logger.info("Attribution boost (Option C) enabled")
+        if guidance_args.protect_just_unmasked:
+            logger.info("Protect just-unmasked (Option B) enabled")
+        if guidance_args.fresh_logits_remask:
+            logger.info("Fresh logits for remasking (Option A) enabled")
 
     # --- num_rooms distribution from training set ---
     mat_path = _PROJECT_ROOT / cfg.data.mat_path
@@ -358,6 +372,8 @@ def generate_guided_samples(
                     t_switch=cfg.eval.remasking.get("t_switch", 1.0),
                     remasking_fn=remasking_fn,
                     attribution_boost=guidance_args.attribution_boost,
+                    protect_just_unmasked=guidance_args.protect_just_unmasked,
+                    fresh_logits_for_remask=guidance_args.fresh_logits_remask,
                     rate_network=rate_network,
                     num_rooms_distribution=num_rooms_dist,
                     device=device,
@@ -423,6 +439,8 @@ def generate_guided_samples(
             "reward_mode": reward_mode,
             "num_constraints": len(constraints),
             "attribution_boost": guidance_args.attribution_boost,
+            "protect_just_unmasked": guidance_args.protect_just_unmasked,
+            "fresh_logits_remask": guidance_args.fresh_logits_remask,
         },
         "per_seed": per_seed_data,
         "guidance_stats": per_seed_stats,
