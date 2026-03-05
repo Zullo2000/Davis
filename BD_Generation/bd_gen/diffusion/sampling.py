@@ -248,6 +248,7 @@ def _single_step_remask(
     pad_mask: Tensor,
     node_logits: Tensor,
     edge_logits: Tensor,
+    confidence_boost: Tensor | None = None,
 ) -> Tensor:
     """Apply remasking if applicable (step 4i).
 
@@ -264,6 +265,8 @@ def _single_step_remask(
         pad_mask: (B, SEQ_LEN) bool.
         node_logits: (B, n_max, NODE_VOCAB_SIZE) model predictions.
         edge_logits: (B, n_edges, EDGE_VOCAB_SIZE) model predictions.
+        confidence_boost: (B, SEQ_LEN) optional additive confidence boost
+            from reward attribution (Option C). Passed to remasking_fn.
 
     Returns:
         (B, SEQ_LEN) possibly remasked token tensor.
@@ -272,6 +275,7 @@ def _single_step_remask(
         x_t = remasking_fn(
             x_t, t_now, t_next, pad_mask,
             node_logits=node_logits, edge_logits=edge_logits,
+            confidence_boost=confidence_boost,
         )
     return x_t
 

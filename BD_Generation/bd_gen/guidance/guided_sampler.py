@@ -62,6 +62,8 @@ class GuidanceStatsStep(TypedDict):
     reward_remasking_delta: float
     positions_remasked: float
     violations: dict[str, float]
+    mean_attribution_boost: float
+    positions_boosted: float
 
 
 class GuidanceStatsStepPerSample(TypedDict):
@@ -229,6 +231,83 @@ def _score_single_hard(
 
 
 # ---------------------------------------------------------------------------
+# Reward-attributed confidence boosting (Option C)
+# ---------------------------------------------------------------------------
+
+
+def _compute_attribution_boost(
+    candidates: Tensor,
+    rewards: Tensor,
+    selected_k: Tensor,
+    x_t_pre: Tensor,
+    n_max: int,
+    K0: int = 4,
+    eps: float = 1e-8,
+) -> Tensor:
+    """Compute per-position confidence boost from reward attribution.
+
+    For each just-unmasked position, computes how much the winner's token
+    choice correlates with higher reward across the K candidates, then
+    scales by the self-calibrating beta = K/(K+K0) / (sigma_r + eps).
+
+    Args:
+        candidates: (K, B, SEQ) candidate tokens after unmasking.
+        rewards: (K, B) float64 rewards for each candidate.
+        selected_k: (B,) long — winner index per sample.
+        x_t_pre: (B, SEQ) state before unmasking (to identify U_t).
+        n_max: Number of node positions (for MASK token distinction).
+        K0: Statistical trust floor (default 4).
+        eps: Numerical stability epsilon.
+
+    Returns:
+        (B, SEQ) float32 tensor of additive confidence boosts.
+        Only positions in U_t (just-unmasked) get non-zero boosts.
+    """
+    K, B, SEQ = candidates.shape
+
+    # Guard: K < 2 means we can't form groups for attribution
+    if K < 2:
+        return torch.zeros(B, SEQ, dtype=torch.float32, device=candidates.device)
+
+    # 1. Identify just-unmasked positions U_t
+    winner = candidates[selected_k, torch.arange(B, device=candidates.device)]  # (B, SEQ)
+
+    is_mask_pre = torch.zeros(B, SEQ, dtype=torch.bool, device=candidates.device)
+    is_mask_pre[:, :n_max] = (x_t_pre[:, :n_max] == NODE_MASK_IDX)
+    is_mask_pre[:, n_max:] = (x_t_pre[:, n_max:] == EDGE_MASK_IDX)
+
+    is_mask_post = torch.zeros(B, SEQ, dtype=torch.bool, device=candidates.device)
+    is_mask_post[:, :n_max] = (winner[:, :n_max] == NODE_MASK_IDX)
+    is_mask_post[:, n_max:] = (winner[:, n_max:] == EDGE_MASK_IDX)
+
+    just_unmasked = is_mask_pre & ~is_mask_post  # (B, SEQ)
+
+    # 2. Per-position reward attribution (all float64 for precision)
+    # match[k,b,l] = True if candidate k has the same token as winner at position l
+    match = (candidates == winner.unsqueeze(0))  # (K, B, SEQ)
+    r_expanded = rewards.unsqueeze(-1)  # (K, B, 1)
+
+    n_match = match.double().sum(dim=0).clamp(min=1.0)  # (B, SEQ)
+    r_match_mean = (r_expanded * match.double()).sum(dim=0) / n_match  # (B, SEQ)
+    r_all_mean = rewards.mean(dim=0).unsqueeze(-1)  # (B, 1)
+    attribution = r_match_mean - r_all_mean  # (B, SEQ)
+
+    # 3. Self-calibrating beta: K/(K+K0) / (sigma_r + eps)
+    sigma_r = rewards.std(dim=0)  # (B,) float64
+    beta = (K / (K + K0)) / (sigma_r + eps)  # (B,)
+
+    # Guard: if sigma_r < eps for a sample, zero its boost
+    low_variance = sigma_r < eps  # (B,)
+
+    # 4. Assemble boost (only positive attribution, only U_t)
+    boost = beta.unsqueeze(-1) * attribution.clamp(min=0.0)  # (B, SEQ)
+    boost = boost * just_unmasked.double()  # zero outside U_t
+    boost[low_variance] = 0.0  # zero for low-variance samples
+
+    return boost.float()
+
+
+# ---------------------------------------------------------------------------
 # Main guided sampling function
 # ---------------------------------------------------------------------------
 
@@ -250,6 +329,7 @@ def guided_sample(
     fixed_tokens: Tensor | None = None,
     fixed_mask: Tensor | None = None,
     remasking_fn: Callable | None = None,
+    attribution_boost: bool = False,
     rate_network: torch.nn.Module | None = None,
     num_rooms_distribution: Tensor | None = None,
     fixed_num_rooms: int | None = None,
@@ -264,7 +344,8 @@ def guided_sample(
       4. Score each candidate via RewardComposer.
       5. Importance weights: softmax(reward / alpha) per sample over K.
       6. Resample: select winner per sample via multinomial(weights).
-      7. Apply _single_step_remask on winner only.
+      7. Apply _single_step_remask on winner only (with optional
+         confidence boost from reward attribution).
       8. Record diagnostics.
 
     Args:
@@ -283,6 +364,9 @@ def guided_sample(
         fixed_tokens: Inpainting tokens.
         fixed_mask: Inpainting mask.
         remasking_fn: Optional ReMDM remasking function.
+        attribution_boost: If True and remasking_fn is not None, compute
+            per-position reward attribution and boost confidence of
+            reward-aligned just-unmasked positions before remasking.
         rate_network: Optional v2 rate network.
         num_rooms_distribution: Room count distribution.
         fixed_num_rooms: Fixed room count.
@@ -358,6 +442,10 @@ def guided_sample(
             p_unmask = torch.clamp(p_unmask, min=0.0, max=1.0).float()
             p_unmask = p_unmask.unsqueeze(1)  # (B, 1)
 
+        # Save pre-unmask state for attribution boost (Option C)
+        if attribution_boost and remasking_fn is not None:
+            x_t_pre_unmask = x_t.clone()
+
         # 4c. Expand to K*B candidates
         # Use repeat (not repeat_interleave) so that .view(K, B, SEQ)
         # correctly maps candidates[k, b] = k-th proposal for batch b.
@@ -418,10 +506,18 @@ def guided_sample(
         # Record pre-remask reward
         reward_pre = rewards[selected_k, torch.arange(B)]  # (B,)
 
+        # 4i-pre. Compute attribution boost (Option C)
+        conf_boost = None
+        if attribution_boost and remasking_fn is not None and i > 0 and t_now < t_switch:
+            conf_boost = _compute_attribution_boost(
+                candidates, rewards, selected_k, x_t_pre_unmask, n_max,
+            )
+
         # 4i. Remask winner only
         x_t = _single_step_remask(
             x_t, remasking_fn, t_now, t_next, t_switch, i,
             pad_mask, node_logits, edge_logits,
+            confidence_boost=conf_boost,
         )
 
         # 4j. Compute post-remask reward
@@ -477,6 +573,14 @@ def guided_sample(
             violations_selected[name] = v.mean().item()
             violations_selected_per[name] = v
 
+        # Attribution boost diagnostics
+        if conf_boost is not None:
+            mean_boost = conf_boost[conf_boost > 0.01].mean().item() if (conf_boost > 0.01).any() else 0.0
+            n_boosted = (conf_boost > 0.01).float().sum(dim=1).mean().item()
+        else:
+            mean_boost = 0.0
+            n_boosted = 0.0
+
         step_stats = GuidanceStatsStep(
             ess=ess_per_sample.mean().item(),
             max_weight=max_w_per_sample.mean().item(),
@@ -489,6 +593,8 @@ def guided_sample(
             reward_remasking_delta=(reward_post - reward_pre).mean().item(),
             positions_remasked=positions_remasked.mean().item(),
             violations=violations_selected,
+            mean_attribution_boost=mean_boost,
+            positions_boosted=n_boosted,
         )
         stats.steps.append(step_stats)
 

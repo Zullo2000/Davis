@@ -222,12 +222,45 @@ Fine α sweep with revised constraints. Combines constraint revision + finer gri
    - **Key finding**: remasking shifts K* UP (fights guidance, needs more candidates).
    - **Runtime**: 53 min (no-remask) + 48 min (confidence) generation under GPU contention.
    - **Details**: see `docs/guidance.md` §Round 2 — K* sweep.
-6. **Round 3 — α fine-tuning at K\***: NEXT.
-   - No-remasking: sweep α around 0.1 at K=12.
-   - Confidence: sweep α around 0.1 at K=16 (or K=20/24 if budget allows).
-   - Use same reduced setup (2 seeds × 100 samples = 200/config).
-7. Consider: hard reward mode comparison at best α/K.
+6. ~~**Round 3 — α fine-tuning at K=16**~~: DONE (script: `run_g5_alpha.sh`).
+   - Swept α ∈ {0.01, 0.05, 0.1, 0.15, 0.3, 0.5} at K=16 for both no-remask and confidence variants.
+   - 3 seeds × 200 samples = 600 per config.
+7. **Round 4 — Remasking × Reward-mode at K=16, α=0.01**: IN PROGRESS.
+   - Tests new remasking implementation + hard vs soft reward mode.
+   - Grid: {no-remask, confidence} × {soft, hard} = 4 configs.
+   - Tags: `r4soft` / `r4hard` to differentiate in method names.
+   - 3 seeds (42, 123, 456) × 200 samples = 600 per config.
+   - Script: `run_g5_round4.sh` (5 steps: calibrate → generate → evaluate → compare → analyze).
+   - Output: `comparison_guided_round4.md` + per-config trajectory plots.
 8. Expand to v2 variants if warranted.
+
+### Option C — Reward-Attributed Confidence Boosting (2026-03-05)
+Implemented the mitigation for the guidance-remasking conflict: confidence remasking destroys guided positions (low model confidence = high attribution). Option C boosts confidence of reward-aligned just-unmasked positions before remasking.
+
+**Mechanism:**
+- Per-position reward attribution: for each just-unmasked position, compare mean reward of candidates matching vs not matching the winner's token
+- Self-calibrating β = K/(K+K₀) / (σ_r + ε) with K₀=4 — no hyperparameter sweep needed
+- Additive boost to model confidence before `softmax(-confidence)` in remasking
+- Only positions in U_t (just-unmasked) get non-zero boosts; positive attribution only (clamp min=0)
+- Guards: K<2 → skip; σ_r<ε → skip (no reward discrimination)
+
+**Files modified:**
+- `bd_gen/diffusion/remasking.py` — `confidence_boost: Tensor | None = None` param on `__call__()` and `_confidence_remasking()`
+- `bd_gen/diffusion/sampling.py` — `confidence_boost` passthrough in `_single_step_remask()`
+- `bd_gen/guidance/guided_sampler.py` — `_compute_attribution_boost()` helper (vectorized, float64), `attribution_boost: bool = False` param on `guided_sample()`, SVDD loop integration, new diagnostics (`mean_attribution_boost`, `positions_boosted`)
+- `scripts/generate_guided.py` — `--attribution-boost` CLI flag, stored in payload config
+- `docs/guidance.md` — status updated from "not yet implemented" to "implemented"
+
+**Files modified (tests):**
+- `tests/test_remasking.py` — 3 new tests: `TestConfidenceBoost` (None noop, boost protects low-conf, zero noop)
+- `tests/test_guided_sampler.py` — 3 new tests: `TestAttributionBoost` (smoke, reduces remasking delta, noop without remasking)
+
+**Test results:**
+- 6 new tests: **all pass**
+- Full suite: 727 passed, 3 pre-existing failures (`_aggregate_multi_seed` import), 2 skipped
+- **No regressions**
+
+**Backward compatibility:** All changes additive with safe defaults. Feature is opt-in via `attribution_boost=True` / `--attribution-boost`.
 
 ### Files modified
 - `scripts/generate_guided.py` (added `--reward-mode`, `--calibration` CLI overrides)

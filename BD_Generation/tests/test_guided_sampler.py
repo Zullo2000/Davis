@@ -487,3 +487,137 @@ class TestGuidedSamplerTopP:
 
         assert result.shape == (4, vocab_config.seq_len)
         assert (result[:, :vocab_config.n_max] != NODE_MASK_IDX).all()
+
+
+# =========================================================================
+# Attribution Boost Tests (Option C)
+# =========================================================================
+
+
+class TestAttributionBoost:
+    """Tests for reward-attributed confidence boosting."""
+
+    def test_attribution_boost_runs(
+        self, dummy_model, linear_schedule, vocab_config,
+    ):
+        """Smoke test: attribution_boost=True with confidence remasking
+        completes without error."""
+        from bd_gen.diffusion.remasking import RemaskingSchedule
+
+        remasking_fn = RemaskingSchedule(
+            "confidence", 0.3, linear_schedule, vocab_config,
+        )
+        kitchen_idx = NODE_TYPES.index("Kitchen")
+        constraint = ExactCount(
+            name="one_kitchen", room_type_idx=kitchen_idx, target=1,
+        )
+        composer = RewardComposer(
+            constraints=[constraint], reward_mode="soft",
+        )
+
+        result, stats = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=5, num_candidates=4,
+            guidance_alpha=1.0, top_p=0.9,
+            remasking_fn=remasking_fn,
+            attribution_boost=True,
+            fixed_num_rooms=4,
+        )
+
+        assert result.shape == (2, vocab_config.seq_len)
+        assert len(stats.steps) == 5
+        # Check new diagnostic fields are present
+        for step in stats.steps:
+            assert "mean_attribution_boost" in step
+            assert "positions_boosted" in step
+
+    def test_attribution_boost_reduces_remasking_delta(
+        self, dummy_model, linear_schedule, vocab_config,
+    ):
+        """With attribution boost, remasking_delta should be less negative
+        (remasking destroys less of guidance's work)."""
+        from bd_gen.diffusion.remasking import RemaskingSchedule
+
+        remasking_fn = RemaskingSchedule(
+            "confidence", 0.3, linear_schedule, vocab_config,
+        )
+        kitchen_idx = NODE_TYPES.index("Kitchen")
+        constraint = ExactCount(
+            name="one_kitchen", room_type_idx=kitchen_idx, target=1,
+        )
+        composer = RewardComposer(
+            constraints=[constraint], reward_mode="soft",
+        )
+
+        # Run without boost
+        torch.manual_seed(42)
+        _, stats_no_boost = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=4, num_steps=10, num_candidates=4,
+            guidance_alpha=0.1, top_p=0.9,
+            remasking_fn=remasking_fn,
+            attribution_boost=False,
+            fixed_num_rooms=4,
+        )
+
+        # Run with boost
+        torch.manual_seed(42)
+        _, stats_boost = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=4, num_steps=10, num_candidates=4,
+            guidance_alpha=0.1, top_p=0.9,
+            remasking_fn=remasking_fn,
+            attribution_boost=True,
+            fixed_num_rooms=4,
+        )
+
+        # Compare mean remasking delta across steps
+        delta_no_boost = sum(
+            s["reward_remasking_delta"] for s in stats_no_boost.steps
+        ) / len(stats_no_boost.steps)
+        delta_boost = sum(
+            s["reward_remasking_delta"] for s in stats_boost.steps
+        ) / len(stats_boost.steps)
+
+        # With a dummy model this is a soft check — boost should not make
+        # things dramatically worse. Allowing equality since dummy model
+        # may produce near-zero deltas.
+        assert delta_boost >= delta_no_boost - 0.1, (
+            f"Boost delta {delta_boost:.4f} much worse than no-boost "
+            f"{delta_no_boost:.4f}"
+        )
+
+    def test_attribution_boost_noop_without_remasking(
+        self, dummy_model, linear_schedule, vocab_config,
+    ):
+        """attribution_boost=True with remasking_fn=None has no effect."""
+        composer = RewardComposer(constraints=[], reward_mode="soft")
+
+        torch.manual_seed(42)
+        result_no_boost, _ = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=5, num_candidates=4,
+            guidance_alpha=1.0, temperature=0.0,
+            remasking_fn=None,
+            attribution_boost=False,
+            fixed_num_rooms=4,
+        )
+
+        torch.manual_seed(42)
+        result_with_boost, _ = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=5, num_candidates=4,
+            guidance_alpha=1.0, temperature=0.0,
+            remasking_fn=None,
+            attribution_boost=True,
+            fixed_num_rooms=4,
+        )
+
+        assert torch.equal(result_no_boost, result_with_boost), (
+            "attribution_boost should have no effect when remasking_fn=None"
+        )

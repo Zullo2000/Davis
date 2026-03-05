@@ -164,6 +164,7 @@ class RemaskingSchedule:
         pad_mask: Tensor,
         node_logits: Tensor | None = None,
         edge_logits: Tensor | None = None,
+        confidence_boost: Tensor | None = None,
     ) -> Tensor:
         """Apply stochastic remasking to already-decoded positions.
 
@@ -176,6 +177,9 @@ class RemaskingSchedule:
                 for strategy="confidence", ignored otherwise.
             edge_logits: (B, n_edges, EDGE_VOCAB_SIZE) float tensor. Required
                 for strategy="confidence", ignored otherwise.
+            confidence_boost: (B, SEQ_LEN) float tensor of additive confidence
+                boosts from reward attribution. Only used by confidence
+                strategy. None = no boost (default).
 
         Returns:
             (B, SEQ_LEN) long tensor with some positions re-masked.
@@ -198,7 +202,7 @@ class RemaskingSchedule:
         if self.strategy == "confidence":
             should_remask = self._confidence_remasking(
                 x_t, t_now, t_next, remask_candidates, is_mask, pad_mask,
-                node_logits, edge_logits,
+                node_logits, edge_logits, confidence_boost,
             )
         else:
             # cap or rescale: uniform sigma for all decoded positions
@@ -234,6 +238,7 @@ class RemaskingSchedule:
         pad_mask: Tensor,
         node_logits: Tensor | None,
         edge_logits: Tensor | None,
+        confidence_boost: Tensor | None = None,
     ) -> Tensor:
         """Compute per-position remasking decisions using model confidence.
 
@@ -288,6 +293,10 @@ class RemaskingSchedule:
             -1, edge_tokens.unsqueeze(-1)
         ).squeeze(-1)  # (B, n_edges)
         confidence = torch.cat([node_conf, edge_conf], dim=1)  # (B, SEQ_LEN)
+
+        # --- Step 2b: Apply additive confidence boost (Option C) ---
+        if confidence_boost is not None:
+            confidence = confidence + confidence_boost
 
         # --- Step 3: Remasking weights via softmax(-confidence) ---
         # Low confidence → high exp(-conf) → high remasking weight.

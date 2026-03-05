@@ -1070,3 +1070,132 @@ class TestV2Factory:
             rate_network=rate_net,
         )
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: confidence_boost parameter (Option C)
+# ---------------------------------------------------------------------------
+
+
+class TestConfidenceBoost:
+    """Tests for the additive confidence_boost parameter in remasking."""
+
+    def test_confidence_boost_none_is_noop(self, linear_schedule, vocab_config):
+        """confidence_boost=None gives identical results to omitting it."""
+        vc = vocab_config
+        B = 4
+        x_t = torch.zeros(B, vc.seq_len, dtype=torch.long)
+        pad_mask = torch.ones(B, vc.seq_len, dtype=torch.bool)
+        for k in range(vc.n_max):
+            x_t[:, k] = k % 10
+        for pos in range(vc.n_edges):
+            x_t[:, vc.n_max + pos] = pos % 10
+
+        node_logits = torch.randn(B, vc.n_max, NODE_VOCAB_SIZE)
+        edge_logits = torch.randn(B, vc.n_edges, EDGE_VOCAB_SIZE)
+
+        rs = RemaskingSchedule("confidence", 0.0, linear_schedule, vc)
+
+        for seed in range(50):
+            torch.manual_seed(seed)
+            r_without = rs(
+                x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
+                node_logits=node_logits, edge_logits=edge_logits,
+            )
+            torch.manual_seed(seed)
+            r_with_none = rs(
+                x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
+                node_logits=node_logits, edge_logits=edge_logits,
+                confidence_boost=None,
+            )
+            assert torch.equal(r_without, r_with_none), (
+                f"seed {seed}: confidence_boost=None should be identical to omitting it"
+            )
+
+    def test_confidence_boost_protects_low_conf(self, linear_schedule,
+                                                 vocab_config):
+        """A high boost on a low-confidence position should reduce its remasking rate."""
+        vc = vocab_config
+        B = 1
+        x_t = torch.zeros(B, vc.seq_len, dtype=torch.long)
+        pad_mask = vc.compute_pad_mask(vc.n_max).unsqueeze(0)
+        for k in range(vc.n_max):
+            x_t[0, k] = k % 10
+        for pos in range(vc.n_edges):
+            x_t[0, vc.n_max + pos] = pos % 10
+
+        # Position 0 has low confidence
+        node_logits, edge_logits = _make_logits_with_confidence(
+            vc, x_t, pad_mask,
+            high_conf_nodes=[],
+            low_conf_nodes=[(0, 0)],
+        )
+
+        rs = RemaskingSchedule("confidence", 0.5, linear_schedule, vc)
+
+        # Count remasking rate for position 0 without boost
+        n_trials = 2000
+        no_boost_count = 0
+        for i in range(n_trials):
+            torch.manual_seed(i)
+            result = rs(
+                x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
+                node_logits=node_logits, edge_logits=edge_logits,
+            )
+            if result[0, 0] == NODE_MASK_IDX:
+                no_boost_count += 1
+
+        # Count remasking rate with a large boost on position 0
+        boost = torch.zeros(B, vc.seq_len)
+        boost[0, 0] = 5.0  # large confidence boost
+
+        boosted_count = 0
+        for i in range(n_trials):
+            torch.manual_seed(i)
+            result = rs(
+                x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
+                node_logits=node_logits, edge_logits=edge_logits,
+                confidence_boost=boost,
+            )
+            if result[0, 0] == NODE_MASK_IDX:
+                boosted_count += 1
+
+        # With boost, position 0 should be remasked less
+        assert boosted_count < no_boost_count, (
+            f"Boosted position remasked {boosted_count} times vs "
+            f"{no_boost_count} without boost. Expected boosted < no_boost."
+        )
+
+    def test_confidence_boost_zero_is_noop(self, linear_schedule, vocab_config):
+        """confidence_boost=zeros should give identical results to None."""
+        vc = vocab_config
+        B = 4
+        x_t = torch.zeros(B, vc.seq_len, dtype=torch.long)
+        pad_mask = torch.ones(B, vc.seq_len, dtype=torch.bool)
+        for k in range(vc.n_max):
+            x_t[:, k] = k % 10
+        for pos in range(vc.n_edges):
+            x_t[:, vc.n_max + pos] = pos % 10
+
+        node_logits = torch.randn(B, vc.n_max, NODE_VOCAB_SIZE)
+        edge_logits = torch.randn(B, vc.n_edges, EDGE_VOCAB_SIZE)
+
+        rs = RemaskingSchedule("confidence", 0.0, linear_schedule, vc)
+        zero_boost = torch.zeros(B, vc.seq_len)
+
+        for seed in range(50):
+            torch.manual_seed(seed)
+            r_none = rs(
+                x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
+                node_logits=node_logits, edge_logits=edge_logits,
+                confidence_boost=None,
+            )
+            torch.manual_seed(seed)
+            r_zero = rs(
+                x_t.clone(), t_now=0.5, t_next=0.4, pad_mask=pad_mask,
+                node_logits=node_logits, edge_logits=edge_logits,
+                confidence_boost=zero_boost,
+            )
+            assert torch.equal(r_none, r_zero), (
+                f"seed {seed}: zero boost should give identical results to None"
+            )

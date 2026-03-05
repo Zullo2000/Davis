@@ -189,6 +189,11 @@ def _parse_guidance_args() -> tuple[argparse.Namespace, list[str]]:
         "--calibration", type=str, default=None,
         help="Override calibration JSON path. Default: from config.",
     )
+    parser.add_argument(
+        "--attribution-boost", action="store_true", default=False,
+        help="Enable reward-attributed confidence boosting (Option C). "
+             "Only effective with confidence remasking.",
+    )
 
     guidance_args, remaining = parser.parse_known_args()
     return guidance_args, remaining
@@ -291,6 +296,8 @@ def generate_guided_samples(
             cfg.eval.remasking.eta,
             cfg.eval.remasking.get("t_switch", 1.0),
         )
+        if guidance_args.attribution_boost:
+            logger.info("Attribution boost (Option C) enabled")
 
     # --- num_rooms distribution from training set ---
     mat_path = _PROJECT_ROOT / cfg.data.mat_path
@@ -350,6 +357,7 @@ def generate_guided_samples(
                     unmasking_mode=unmasking_mode,
                     t_switch=cfg.eval.remasking.get("t_switch", 1.0),
                     remasking_fn=remasking_fn,
+                    attribution_boost=guidance_args.attribution_boost,
                     rate_network=rate_network,
                     num_rooms_distribution=num_rooms_dist,
                     device=device,
@@ -414,6 +422,7 @@ def generate_guided_samples(
             "phi": guidance_config.phi,
             "reward_mode": reward_mode,
             "num_constraints": len(constraints),
+            "attribution_boost": guidance_args.attribution_boost,
         },
         "per_seed": per_seed_data,
         "guidance_stats": per_seed_stats,
