@@ -941,6 +941,50 @@ Both use confidence remasking + soft reward (hard reward was conclusively ruled 
 - **Option B**: Should break the same-step feedback loop (protect guided tokens for 1 step). If the conflict is primarily same-step, this should close most of the gap to no-remasking. If multi-step compounding dominates, improvement will be modest.
 - **Option A**: Gold standard — fresh logits give the model a chance to evaluate guided tokens in context. Should be the strongest mitigation, but at 2× cost. Provides an upper bound on what informed remasking can achieve.
 
-#### Results
+#### Results — Satisfaction (all)
 
-> Pending — run `bash scripts/run_g5_round5.sh all` on jabiru.
+| Config | Overall | one_kitchen | kitchen_near_living | no_bath_kitchen | between_2_3_bath |
+|--------|---------|------------|-------------------|----------------|-----------------|
+| No-remask + soft (R4) | **69.0%** | 100% | 100% | 74.7% | 93.8% |
+| Confidence + C + soft (R4) | 56.0% | 97.3% | 98.7% | 79.0% | 76.5% |
+| Confidence + A + soft (R5) | 55.0% | 98.5% | 99.5% | 75.2% | 79.5% |
+| Confidence + B + soft (R5) | 56.0% | 99.5% | 99.7% | 76.3% | 77.3% |
+
+#### Quality metrics
+
+| Config | Validity | Inside validity | Diversity | Mode cov. (w) | Cond. edge TV (w) |
+|--------|---------|----------------|-----------|-------------|-------------------|
+| No-remask + soft (R4) | 100% | 99.8% | 0.905 | 41.2% | 0.626 |
+| Confidence + C + soft (R4) | 100% | 95.2% | 0.992 | 50.4% | 0.607 |
+| Confidence + A + soft (R5) | 99.5% | 95.3% | 0.993 | 53.6% | 0.600 |
+| Confidence + B + soft (R5) | 100% | 97.8% | 0.990 | 50.4% | 0.604 |
+
+#### Findings
+
+1. **All three mitigations (A, B, C) perform identically at ~55–56% overall satisfaction.** None closes the 13pp gap to no-remasking (69%). The problem is structural, not a matter of implementation detail.
+
+2. **Option A (fresh logits, 2× cost) provides no benefit.** Re-running the model on post-unmask tokens produces similar confidence rankings — the model fundamentally assigns low confidence to guided positions because they were chosen by reward-steering rather than model likelihood. Fresh logits don't change this.
+
+3. **Option B (protect just-unmasked, zero cost) provides no benefit.** Protection only lasts one step — positions get remasked on subsequent steps. The single-step protection window is too narrow.
+
+4. **Trajectory diagnostics confirm persistent oscillation in all variants:**
+   - Remasking delta oscillates wildly (-2 to +1) across all 100 steps, never damping
+   - ESS is erratic (2–16) rather than stabilizing
+   - Per-constraint violations show saw-tooth patterns: guidance resolves → remasking undoes → guidance re-resolves
+   - Reward trajectory is non-monotonic and chaotic
+
+5. **Quality is comparable across all remasking variants.** Option B has a slight edge on inside validity (97.8% vs 95.2–95.3%). Confidence remasking variants have better diversity/mode coverage than no-remask, but worse constraint satisfaction.
+
+#### Verdict — Remasking mitigation investigation concluded
+
+**No single-step mitigation can overcome the structural conflict between confidence remasking and SVDD guidance.** The core issue: confidence remasking re-randomizes positions where model confidence is low, but guidance deliberately steers tokens away from the model's preferred distribution, making them inherently low-confidence. This creates an unresolvable tug-of-war at every step.
+
+**No-remasking at K=16, α=0.01 remains the best configuration** at 69% overall satisfaction (5.2× the unguided 13.3% baseline). However, the irreversibility of no-remasking poses a scalability concern: as the number of constraints grows, early committed tokens that violate constraints can never be corrected. See §Open Question below.
+
+#### Open Question — Selective remasking for constraint scaling
+
+Without remasking, the denoising process is fully irreversible: once a token is unmasked, it stays committed forever. This works well with 4 constraints but may degrade as constraint count grows — if two constraint-violating tokens are committed in early steps, the violation can never be resolved.
+
+A promising direction: **early-stage remasking** — enable confidence remasking only during initial denoising steps (high noise), then switch to no-remasking for the final phase where guidance needs to lock in gains. The intuition is that early remasking provides error correction when most tokens are still MASK and violations are easily fixable, while late-stage no-remasking prevents the guidance-destroying oscillation we observed.
+
+This connects to the existing `t_switch` parameter (already implemented for turning remasking on/off at a threshold). Further investigation is deferred to a future round.

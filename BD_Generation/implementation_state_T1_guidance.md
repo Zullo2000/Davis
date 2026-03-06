@@ -7,7 +7,7 @@
 
 
 ## Overall Status
-- Current phase: G5 IN PROGRESS (Round 5: Option A vs Option B mitigation comparison)
+- Current phase: G5 IN PROGRESS (Rounds 1–5 complete; remasking mitigations concluded; next: selective early-stage remasking or v2)
 - Dependencies: v1 pipeline complete, v2 (MELD) trained and evaluated
 
 ### Dependency Graph
@@ -229,15 +229,15 @@ Fine α sweep with revised constraints. Combines constraint revision + finer gri
    - **Result**: Option C (RACB) failed to rescue confidence remasking (56% vs 69% no-remask).
    - Hard reward mode conclusively bad (~35%). Soft reward only going forward.
    - Script: `run_g5_round4.sh`. Output: `comparison_guided_round4.md`.
-8. **Round 5 — Option A vs Option B at K=16, α=0.01**: IN PROGRESS.
-   - Tests remaining remasking mitigations: Option A (fresh logits, 2× cost) and Option B (protect just-unmasked, zero cost).
-   - Grid: 2 configs (confidence + Option A, confidence + Option B), soft reward only.
-   - Tags: `r5optA` / `r5optB`.
-   - 3 seeds (42, 123, 456) × 200 samples = 600 per config.
-   - Comparison targets: no-remask soft (69%), confidence + Option C soft (56%).
-   - Script: `run_g5_round5.sh` (5 steps: calibrate → generate → evaluate → compare → analyze).
-   - Output: `comparison_guided_round5.md` + per-config trajectory plots.
-9. Expand to v2 variants if warranted.
+8. ~~**Round 5 — Option A vs Option B at K=16, α=0.01**~~: DONE (2026-03-06).
+   - **Result**: Both A and B match Option C at ~55–56% — none closes the gap to no-remask (69%).
+   - Option A (fresh logits, 2× cost): 55.0%. Fresh model call produces same confidence rankings.
+   - Option B (protect just-unmasked, 0 cost): 56.0%. Protection too narrow (1 step).
+   - Trajectories confirm persistent oscillation in all remasking variants.
+   - **Conclusion**: Structural conflict — no single-step mitigation works. No-remask is best for SVDD.
+   - Script: `run_g5_round5.sh`. Output: `comparison_guided_round5.md`.
+9. **Open**: Selective early-stage remasking for constraint scaling (see docs/guidance.md).
+10. Expand to v2 variants if warranted.
 
 ### Option C — Reward-Attributed Confidence Boosting (2026-03-05)
 Implemented the mitigation for the guidance-remasking conflict: confidence remasking destroys guided positions (low model confidence = high attribution). Option C boosts confidence of reward-aligned just-unmasked positions before remasking.
@@ -267,18 +267,24 @@ Implemented the mitigation for the guidance-remasking conflict: confidence remas
 
 **Backward compatibility:** All changes additive with safe defaults. Feature is opt-in via `attribution_boost=True` / `--attribution-boost`.
 
-### Round 5 — Option A vs Option B setup (2026-03-05)
-Renamed "Reward-Attributed Confidence Boosting" back to "Option C" throughout docs (headings in `docs/guidance.md`, comments in `run_g5_round4.sh`) since Options A and B are now also in scope.
+### Round 5 — Option A vs Option B (2026-03-06)
 
-**Round 5 experiment**: Tests Option A (fresh logits) and Option B (protect just-unmasked) individually with confidence remasking + soft reward at K=16, α=0.01. Compares against Round 4 baselines (no-remask 69%, confidence+C 56%).
+**Result**: Both Option A (55.0%) and Option B (56.0%) match Option C (56.0%) — no mitigation closes the gap to no-remask (69%).
+
+**Root cause confirmed**: Confidence remasking is structurally anti-correlated with guidance. The model assigns low confidence to reward-steered tokens (they diverge from model likelihood), so remasking preferentially destroys guided positions. This is not a same-step feedback issue (Option B fails) nor a stale-logits issue (Option A fails) — it is intrinsic to the confidence criterion.
+
+**Trajectories**: ESS erratic (2–16), remasking delta oscillates (-2 to +1), per-constraint violations show saw-tooth pattern, reward non-monotonic. Identical qualitative behavior across all three mitigations.
+
+**Quality**: All remasking variants comparable. Option B best inside validity (97.8% vs 95.2–95.3%). No-remask best constraint satisfaction but lowest diversity (0.905 vs 0.990–0.993).
 
 **Files created:**
-- `scripts/run_g5_round5.sh` — 2-config experiment script (calibrate → generate → evaluate → compare → analyze)
+- `scripts/run_g5_round5.sh` — 2-config experiment script
 
 **Files modified:**
-- `docs/guidance.md` — headings renamed to `Option X — Description` pattern; added Round 5 section with motivation, setup, and expected outcomes
-- `scripts/run_g5_round4.sh` — comments updated to use "Option C" label
-- `implementation_state_T1_guidance.md` — Round 4 marked DONE, Round 5 added to experiment plan
+- `docs/guidance.md` — Round 5 results, verdict, open question on selective early-stage remasking
+- `implementation_state_T1_guidance.md` — Round 5 marked DONE, open question added
+
+**Conclusion**: No-remask + soft reward at K=16, α=0.01 is the current best (69%, 5.2× baseline). Remasking mitigation investigation concluded. Next direction: selective early-stage remasking for constraint scaling.
 
 ### Files modified
 - `scripts/generate_guided.py` (added `--reward-mode`, `--calibration` CLI overrides)
