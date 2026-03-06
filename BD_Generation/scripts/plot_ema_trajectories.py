@@ -23,9 +23,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # ── Configs to compare ──────────────────────────────────────────────
 SCHEDULE = "loglinear_noise_sc"
 CONFIGS = {
-    "Option A (fresh logits)": "llada_topp0.9_remdm_confidence_tsw1.0_guided_r5optA_K16_a0.01",
-    "Option B (protect just-unmasked)": "llada_topp0.9_remdm_confidence_tsw1.0_guided_r5optB_K16_a0.01",
-    "No-remask (best)": "llada_topp0.9_no_remask_guided_r4soft_K16_a0.01",
+    "Confidence remasking (Option C, α=0.01)": "llada_topp0.9_remdm_confidence_tsw1.0_guided_r4soft_K16_a0.01",
+    "No-remask (α=0.01)": "llada_topp0.9_no_remask_guided_r4soft_K16_a0.01",
 }
 
 # EMA smoothing factors: beta close to 1 = heavy smoothing
