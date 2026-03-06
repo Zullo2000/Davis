@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot raw + EMA-smoothed ESS and reward trajectories for Round 5 configs.
+"""Plot EMA-smoothed trajectories and adaptive lock criteria.
 
 Run on jabiru where _samples.pt files live:
     python scripts/plot_ema_trajectories.py
@@ -35,6 +35,10 @@ BETA_STYLES = {0.7: ("--", 1.5), 0.85: ("-", 2.0), 0.95: ("-.", 2.5)}
 N_SAMPLES = 4
 SEED = 42
 
+# Adaptive lock parameters
+LOCK_CONSECUTIVE = 3  # d_ema <= 0 for this many consecutive steps
+LOCK_T_DEADLINE = 0.5  # hard deadline (fraction of total steps)
+
 
 def compute_ema(values: list[float], beta: float) -> np.ndarray:
     """Exponential moving average: ema[t] = beta * ema[t-1] + (1-beta) * x[t]."""
@@ -44,6 +48,41 @@ def compute_ema(values: list[float], beta: float) -> np.ndarray:
     for t in range(1, len(arr)):
         ema[t] = beta * ema[t - 1] + (1 - beta) * arr[t]
     return ema
+
+
+def find_lock_step(
+    ema_reward: np.ndarray,
+    n_consecutive: int = LOCK_CONSECUTIVE,
+    t_deadline_frac: float = LOCK_T_DEADLINE,
+) -> int:
+    """Find the step where adaptive lock triggers.
+
+    Lock fires at whichever comes first:
+      (a) d_ema[t] <= 0 for `n_consecutive` consecutive steps
+      (b) step = t_deadline_frac * total_steps  (hard deadline)
+
+    Returns the lock step index.
+    """
+    n_steps = len(ema_reward)
+    hard_deadline = int(t_deadline_frac * n_steps)
+
+    # Compute derivative
+    d_ema = np.diff(ema_reward)  # length n_steps - 1
+
+    # Find first run of n_consecutive non-positive derivatives
+    streak = 0
+    for t in range(len(d_ema)):
+        if d_ema[t] <= 0:
+            streak += 1
+            if streak >= n_consecutive:
+                # Lock fires at the step after the streak ends
+                lock_step = t + 1  # +1 because d_ema[t] = ema[t+1] - ema[t]
+                return min(lock_step, hard_deadline)
+        else:
+            streak = 0
+
+    # Never triggered — use hard deadline
+    return hard_deadline
 
 
 def load_per_sample_trajectories(
@@ -266,9 +305,137 @@ def plot_ema_ess_with_thresholds(
     plt.close(fig)
 
 
+def plot_reward_derivative_lock(
+    configs: dict[str, str],
+    n_samples: int = N_SAMPLES,
+    seed: int = SEED,
+) -> None:
+    """Plot EMA(reward), its derivative, and adaptive lock trigger points.
+
+    Lock criterion: d_ema(reward) <= 0 for 3 consecutive steps, or t=0.5 deadline.
+    Shows 3 β values to compare smoothing levels.
+    """
+    n_configs = len(configs)
+    fig, axes = plt.subplots(
+        3, n_configs,
+        figsize=(7 * n_configs, 12),
+        squeeze=False,
+    )
+
+    rng = np.random.RandomState(seed)
+    sample_colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e"]
+
+    for col, (label, model) in enumerate(configs.items()):
+        print(f"Loading {label} for reward-derivative lock...")
+        trajs = load_per_sample_trajectories(model)
+
+        if not trajs:
+            for row in range(3):
+                axes[row, col].text(0.5, 0.5, "No data", transform=axes[row, col].transAxes,
+                                     ha="center", va="center", fontsize=14)
+            axes[0, col].set_title(label)
+            continue
+
+        indices = rng.choice(len(trajs), size=min(n_samples, len(trajs)), replace=False)
+
+        for beta_idx, beta in enumerate(BETAS):
+            ax_reward = axes[0, col]
+            ax_deriv = axes[1, col]
+            ax_lock = axes[2, col]
+
+            for i, idx in enumerate(indices):
+                raw_reward = trajs[idx]["reward_selected"]
+                steps = np.arange(len(raw_reward))
+                color = sample_colors[i % len(sample_colors)]
+                ls, lw = BETA_STYLES[beta]
+
+                ema_reward = compute_ema(raw_reward, beta)
+                d_ema = np.diff(ema_reward)
+                lock_step = find_lock_step(ema_reward)
+
+                # Row 0: EMA(reward) with lock marker
+                if beta_idx == 0:
+                    # Raw reward (only once per sample)
+                    ax_reward.plot(steps, raw_reward, color=color, alpha=0.15,
+                                  linewidth=0.6)
+                ax_reward.plot(steps, ema_reward, color=color, linestyle=ls,
+                               linewidth=lw, alpha=0.8,
+                               label=f"s{idx} β={beta}" if i == 0 else None)
+                # Lock marker
+                ax_reward.axvline(lock_step, color=color, linestyle=ls,
+                                  alpha=0.3, linewidth=1.0)
+                ax_reward.plot(lock_step, ema_reward[lock_step], "v",
+                               color=color, markersize=5 + beta_idx, alpha=0.8)
+
+                # Row 1: d_ema(reward) with zero line
+                ax_deriv.plot(steps[1:], d_ema, color=color, linestyle=ls,
+                              linewidth=lw, alpha=0.7,
+                              label=f"s{idx} β={beta}" if i == 0 else None)
+                ax_deriv.axvline(lock_step, color=color, linestyle=ls,
+                                alpha=0.3, linewidth=1.0)
+
+                # Row 2: cumulative streak counter (consecutive d_ema <= 0)
+                streak = np.zeros(len(d_ema), dtype=int)
+                count = 0
+                for t in range(len(d_ema)):
+                    if d_ema[t] <= 0:
+                        count += 1
+                    else:
+                        count = 0
+                    streak[t] = count
+                ax_lock.plot(steps[1:], streak, color=color, linestyle=ls,
+                             linewidth=lw, alpha=0.7,
+                             label=f"s{idx} β={beta}" if i == 0 else None)
+                ax_lock.axvline(lock_step, color=color, linestyle=ls,
+                                alpha=0.3, linewidth=1.0)
+
+        # Hard deadline
+        n_steps = len(trajs[indices[0]]["reward_selected"])
+        hard_deadline = int(LOCK_T_DEADLINE * n_steps)
+
+        for row in range(3):
+            axes[row, col].axvline(hard_deadline, color="red", linestyle="--",
+                                   alpha=0.5, linewidth=1.5,
+                                   label=f"t={LOCK_T_DEADLINE} deadline" if row == 0 else None)
+
+        # Formatting
+        axes[0, col].set_title(f"{label}", fontsize=11)
+        axes[0, col].set_ylabel("EMA(reward)")
+        axes[0, col].grid(True, alpha=0.3)
+
+        axes[1, col].axhline(0, color="black", linewidth=0.8, alpha=0.5)
+        axes[1, col].set_ylabel("d(EMA reward) / dt")
+        axes[1, col].grid(True, alpha=0.3)
+
+        axes[2, col].axhline(LOCK_CONSECUTIVE, color="gray", linestyle="--",
+                             alpha=0.5, label=f"threshold={LOCK_CONSECUTIVE}")
+        axes[2, col].set_ylabel("Consecutive d_ema ≤ 0")
+        axes[2, col].set_xlabel("Denoising step")
+        axes[2, col].grid(True, alpha=0.3)
+
+        if col == 0:
+            for row in range(3):
+                axes[row, col].legend(fontsize=6, loc="best", ncol=2)
+
+    fig.suptitle(
+        f"Adaptive lock: d(EMA_reward) ≤ 0 for {LOCK_CONSECUTIVE} consecutive steps\n"
+        f"▼ = lock trigger | red dashed = t={LOCK_T_DEADLINE} hard deadline\n"
+        f"β: 0.7 (dashed), 0.85 (solid), 0.95 (dash-dot)",
+        fontsize=12, fontweight="bold",
+    )
+    fig.tight_layout()
+
+    out_path = PROJECT_ROOT / "eval_results" / SCHEDULE / "ema_reward_lock.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"Saved: {out_path}")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     print("=== EMA Trajectory Analysis ===\n")
     plot_ema_comparison(CONFIGS)
     print()
     plot_ema_ess_with_thresholds(CONFIGS)
+    print()
+    plot_reward_derivative_lock(CONFIGS)
     print("\nDone!")
