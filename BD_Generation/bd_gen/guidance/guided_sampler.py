@@ -343,6 +343,7 @@ def guided_sample(
     ema_beta: float = 0.85,
     ema_lock_consecutive: int = 3,
     ema_lock_deadline: float = 0.5,
+    ema_lock_warmup: float = 0.0,
     rate_network: torch.nn.Module | None = None,
     num_rooms_distribution: Tensor | None = None,
     fixed_num_rooms: int | None = None,
@@ -397,6 +398,9 @@ def guided_sample(
             derivatives to trigger lock (default 3).
         ema_lock_deadline: Hard deadline as fraction of total steps
             (default 0.5 = lock by step 50/100).
+        ema_lock_warmup: Fraction of total steps before the derivative
+            criterion can trigger a lock (default 0.0 = no warmup).
+            During warmup, only the hard deadline can lock a sample.
         rate_network: Optional v2 rate network.
         num_rooms_distribution: Room count distribution.
         fixed_num_rooms: Fixed room count.
@@ -452,6 +456,7 @@ def guided_sample(
         ema_locked = torch.zeros(B, dtype=torch.bool, device=device)
         ema_lock_step = torch.full((B,), -1, dtype=torch.long)
         ema_deadline = int(ema_lock_deadline * num_steps)
+        ema_warmup_step = int(ema_lock_warmup * num_steps)
 
     # --- Step 4: Reverse loop with K-candidate reweighting ---
     for i in range(num_steps - 1, -1, -1):
@@ -560,9 +565,12 @@ def guided_sample(
                     non_positive, ema_streak + 1,
                     torch.zeros_like(ema_streak),
                 )
-                new_locks = (~ema_locked) & (
+                streak_trigger = (
                     (ema_streak >= ema_lock_consecutive)
-                    | (step_idx >= ema_deadline)
+                    & (step_idx >= ema_warmup_step)
+                )
+                new_locks = (~ema_locked) & (
+                    streak_trigger | (step_idx >= ema_deadline)
                 )
                 ema_lock_step[new_locks] = step_idx
                 ema_locked = ema_locked | new_locks

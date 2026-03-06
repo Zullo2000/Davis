@@ -1022,24 +1022,94 @@ The open question from Round 5 — how to get the benefits of early remasking wi
 - `scripts/generate_guided.py` — 4 new CLI flags
 - `scripts/analyze_guidance_stats.py` — EMA + lock overlay in trajectory plots
 
-### Round 6 — Option A + EMA Lock vs Option B + EMA Lock
+### Round 6 — Option A + EMA Lock vs Option B + EMA Lock (2026-03-06)
 
-**Status:** Experiment script ready (`scripts/run_g5_round6.sh`), awaiting GPU run on jabiru.
+#### Motivation
 
-**Grid:** 2 configs at K=16, α=0.01, soft reward, v1 loglinear:
-1. confidence + Option A (fresh logits) + EMA lock → tag `r6lockA`
-2. confidence + Option B (protect just-unmasked) + EMA lock → tag `r6lockB`
+Rounds 4–5 showed that no single-step mitigation (Options A, B, C) can overcome the guidance-remasking conflict: all plateau at ~55–56% vs 69% for no-remasking. The adaptive EMA lock takes a different approach: allow remasking early (exploration) then permanently disable it per-sample once reward stops improving (exploitation).
+
+#### Setup
+
+- **Fixed**: K=16, α=0.01, v1 loglinear checkpoint, revised 4-constraint set, soft reward only
+- **Grid**: 2 configs (Option A + EMA lock, Option B + EMA lock)
+- **EMA lock params**: β=0.85, consecutive=3 (lock after 3 consecutive d(EMA)≤0 steps), deadline=t=0.5
+- **Samples**: 3 seeds (42, 123, 456) × 200 samples = 600 per config
+- **Tags**: `r6lockA` / `r6lockB`
+- **Script**: `run_g5_round6.sh`
+
+#### Results — Constraint Satisfaction (all 4 constraints)
+
+| Config | Round | Overall | Δ vs R5 (no lock) |
+|--------|-------|---------|-------------------|
+| No-remask + soft | R4 | **69.0%** | — (upper bound) |
+| Confidence + Option C + soft | R4 | 56.0% | — |
+| Confidence + Option A + soft (no lock) | R5 | 55.0% | — |
+| Confidence + Option B + soft (no lock) | R5 | 56.0% | — |
+| Confidence + Option A + EMA lock | **R6** | **60.5%** | +5.5pp |
+| Confidence + Option B + EMA lock | **R6** | **68.2%** | +12.2pp |
+
+#### Results — Quality Comparison
+
+| Metric | No-remask guided (R4) | Lock A (R6) | Lock B (R6) |
+|--------|:---:|:---:|:---:|
+| Validity | 100% | 100% | 100% |
+| Inside validity | 99.8% | 99.8% | 99.7% |
+| Diversity | **0.905** | 0.752 | 0.843 |
+| Mode coverage (weighted) | **41.2%** | 33.1% | 43.1% |
+| Cond. edge TV (weighted) | **0.626** | 0.708 | 0.629 |
+| Node TV | **0.119** | 0.188 | 0.176 |
+| Transitivity | 99.9% | 100% | 100% |
+
+#### Results — Per-constraint breakdown
+
+| Constraint | No-remask unguided | No-remask guided (R4) | Lock A (R6) | Lock B (R6) |
+|---|:---:|:---:|:---:|:---:|
+| one_kitchen | 91.3% | 100% | 100% | 100% |
+| kitchen_near_living | 91.3% | 100% | 100% | 100% |
+| no_bath_kitchen | 52.0% | **74.7%** | 68.7% | 74.5% |
+| between_2_and_3_bathrooms | 49.2% | **93.8%** | 90.5% | 92.8% |
+| **Overall (all 4)** | 13.3% | **69.0%** | 60.5% | 68.2% |
+
+#### Interpretation
+
+1. **EMA lock works, especially with Option B.** Lock B jumps from 56% (R5, no lock) to 68.2% — nearly matching the 69% no-remask upper bound (+12.2pp). Lock A improves less (55% → 60.5%, +5.5pp). The hypothesis is confirmed: remasking's benefit is concentrated in early steps, and locking once reward plateaus preserves late-stage guidance gains.
+
+2. **Why Option B benefits more than Option A.** Option B (protect just-unmasked) is a cheap, targeted intervention that synergizes with the lock: during the early unlocked phase, protection prevents immediate destruction of guided tokens, giving the EMA signal a cleaner reward trajectory. When the lock engages, remasking is fully disabled and Option B becomes irrelevant — the two mechanisms complement each other. Option A (fresh logits) re-evaluates confidence from scratch each step, but the fundamental problem remains: the model assigns low confidence to reward-steered tokens regardless of fresh vs stale logits. The lock partially rescues Option A by cutting off remasking, but can't fix the misaligned confidence signal during the unlocked early phase.
+
+3. **Diversity and mode coverage are lower for lock variants.** Lock B diversity (0.843) and mode coverage (43.1%) are below no-remask guided (0.905, 41.2%) — though mode coverage is actually slightly higher for Lock B. The diversity drop stems from the early remasking phase: remasking destroys some guided diversity before the lock engages, and the remaining steps without remasking cannot fully recover it. Lock A suffers more (0.752 diversity, 33.1% mode coverage) because the flawed confidence signal during the unlocked phase actively steers remasking toward model-preferred (non-guided) tokens, collapsing diversity further. In contrast, no-remask never disrupts guided diversity at any step.
+
+4. **Lock B is the clear winner among remasking variants.** It matches no-remask on constraint satisfaction (68.2% vs 69.0%), has comparable quality (edge TV 0.629 vs 0.626, inside validity 99.7% vs 99.8%), and comes at zero extra compute cost (Option B's protection is free). The only meaningful tradeoff is lower diversity (0.843 vs 0.905).
+
+5. **Two viable production configurations emerge:**
+   - **No-remask + soft** (R4): 69% satisfaction, 0.905 diversity — best overall, simplest.
+   - **Lock B + soft** (R6): 68.2% satisfaction, 0.843 diversity — nearly equivalent, with the theoretical benefit that early remasking can correct committed errors (useful as constraint complexity grows).
+
+**Results saved to:** `eval_results/loglinear_noise_sc/round6_guid/`
+
+### Round 6b — EMA Lock with warmup=0.2
+
+#### Motivation
+
+Round 6 showed Lock B (Option B + EMA lock) nearly matches no-remask at 68.2% satisfaction. However, the lock can trigger very early (as soon as step 3, if the first 3 EMA derivatives are non-positive) — this may be premature since early-step rewards are noisy and the EMA has barely warmed up. Round 6b adds a warmup period: the derivative-based lock criterion only activates after step 20 (20% of 100 steps). The hard deadline at t=0.5 still applies. This gives remasking a guaranteed 20-step exploration window before the lock can engage.
+
+#### Setup
+
+- **Fixed**: K=16, α=0.01, v1 loglinear checkpoint, revised 4-constraint set, soft reward only
+- **Grid**: 2 configs (Option A + EMA lock + warmup, Option B + EMA lock + warmup)
+- **EMA lock params**: β=0.85, consecutive=3, deadline=t=0.5, **warmup=0.2** (lock criterion inactive before step 20)
+- **Samples**: 3 seeds (42, 123, 456) × 200 samples = 600 per config
+- **Tags**: `r6bLockA` / `r6bLockB`
+- **Script**: `run_g5_round6b.sh`
 
 **Comparison targets:**
 | Config | Round | Satisfaction |
 |--------|-------|-------------|
 | no-remask + soft | R4 | 69% |
-| confidence + Option C + soft | R4 | 56% |
-| confidence + Option A + soft (no lock) | R5 | 55% |
-| confidence + Option B + soft (no lock) | R5 | 56% |
-| confidence + Option A + EMA lock | **R6** | ? |
-| confidence + Option B + EMA lock | **R6** | ? |
+| Option A + lock (no warmup) | R6 | 60.5% |
+| Option B + lock (no warmup) | R6 | 68.2% |
+| Option A + lock + warmup=0.2 | **R6b** | ? |
+| Option B + lock + warmup=0.2 | **R6b** | ? |
 
-**Hypothesis:** The EMA lock gives each sample early remasking (error correction) followed by late-stage no-remasking (reward preservation). If remasking's benefit is concentrated in early steps, Round 6 should approach or exceed the 69% no-remask baseline. If the benefit is negligible even early, results will match Round 5 (~55-56%).
+**Hypothesis:** Warmup gives remasking more time to explore and correct early errors before locking. If early locking was premature (locking on noise), warmup should improve satisfaction. If most samples genuinely plateau before step 20, results will match R6.
 
-**Results saved to:** `eval_results/loglinear_noise_sc/round6_guid/`
+**Results saved to:** `eval_results/loglinear_noise_sc/round6b_guid/`

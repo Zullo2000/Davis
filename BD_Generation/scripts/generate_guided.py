@@ -223,6 +223,12 @@ def _parse_guidance_args() -> tuple[argparse.Namespace, list[str]]:
         help="Hard lock deadline as fraction of total steps "
              "(default: 0.5 = step 50/100).",
     )
+    parser.add_argument(
+        "--ema-lock-warmup", type=float, default=0.0,
+        help="Fraction of total steps before the derivative criterion "
+             "can trigger a lock (default: 0.0 = no warmup). "
+             "During warmup, only the hard deadline can lock.",
+    )
 
     guidance_args, remaining = parser.parse_known_args()
     return guidance_args, remaining
@@ -397,6 +403,7 @@ def generate_guided_samples(
                     ema_beta=guidance_args.ema_beta,
                     ema_lock_consecutive=guidance_args.ema_lock_consecutive,
                     ema_lock_deadline=guidance_args.ema_lock_deadline,
+                    ema_lock_warmup=guidance_args.ema_lock_warmup,
                     rate_network=rate_network,
                     num_rooms_distribution=num_rooms_dist,
                     device=device,
@@ -468,6 +475,7 @@ def generate_guided_samples(
             "ema_beta": guidance_args.ema_beta,
             "ema_lock_consecutive": guidance_args.ema_lock_consecutive,
             "ema_lock_deadline": guidance_args.ema_lock_deadline,
+            "ema_lock_warmup": guidance_args.ema_lock_warmup,
         },
         "per_seed": per_seed_data,
         "guidance_stats": per_seed_stats,
