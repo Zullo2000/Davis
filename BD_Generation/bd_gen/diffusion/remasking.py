@@ -57,6 +57,7 @@ class RemaskingSchedule:
         noise_schedule: NoiseSchedule | None,  # None when using rate_network
         vocab_config: VocabConfig,
         rate_network: torch.nn.Module | None = None,  # NEW
+        decay_power: float = 0.0,
     ) -> None:
         if strategy not in ("cap", "rescale", "confidence"):
             raise ValueError(
@@ -74,6 +75,7 @@ class RemaskingSchedule:
         self.noise_schedule = noise_schedule
         self.vocab_config = vocab_config
         self.rate_network = rate_network
+        self.decay_power = decay_power
 
     def _compute_sigma_max(
         self,
@@ -109,6 +111,9 @@ class RemaskingSchedule:
             alpha_s = self.rate_network(t_next_tensor, pad_mask).double()
             sigma_max = (1.0 - alpha_s) / (alpha_t + 1e-8)
             sigma_max = torch.clamp(sigma_max, min=0.0, max=1.0)
+            # Apply power-law decay: sigma_max *= t_now^p
+            if self.decay_power > 0:
+                sigma_max = sigma_max * (t_now ** self.decay_power)
             return sigma_max.float()  # (B, SEQ_LEN)
 
         t_now_tensor = torch.full(
@@ -123,6 +128,10 @@ class RemaskingSchedule:
 
         sigma_max = (1.0 - alpha_s) / (alpha_t + 1e-8)
         sigma_max = torch.clamp(sigma_max, min=0.0, max=1.0)
+
+        # Apply power-law decay: sigma_max *= t_now^p (taper remasking at low t)
+        if self.decay_power > 0:
+            sigma_max = sigma_max * (t_now ** self.decay_power)
 
         return sigma_max.float().unsqueeze(1)  # (B, 1)
 
@@ -334,7 +343,8 @@ def create_remasking_schedule(
     config: dict,
     noise_schedule: NoiseSchedule | None,  # None allowed when rate_network provided
     vocab_config: VocabConfig,
-    rate_network: torch.nn.Module | None = None,  # NEW
+    rate_network: torch.nn.Module | None = None,
+    decay_power: float = 0.0,
 ) -> RemaskingSchedule | None:
     """Factory: create a RemaskingSchedule from a config dict, or None if disabled.
 
@@ -343,6 +353,7 @@ def create_remasking_schedule(
         noise_schedule: NoiseSchedule for alpha(t). None when using rate_network.
         vocab_config: VocabConfig for sequence layout.
         rate_network: Optional rate network for v2 learned forward process.
+        decay_power: Power-law exponent for remasking decay (0 = no decay).
 
     Returns:
         RemaskingSchedule if enabled, else None.
@@ -354,5 +365,6 @@ def create_remasking_schedule(
         eta=config["eta"],
         noise_schedule=noise_schedule,
         vocab_config=vocab_config,
-        rate_network=rate_network,  # NEW
+        rate_network=rate_network,
+        decay_power=decay_power,
     )

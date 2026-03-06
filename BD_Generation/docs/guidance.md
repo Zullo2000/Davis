@@ -1112,4 +1112,134 @@ Round 6 showed Lock B (Option B + EMA lock) nearly matches no-remask at 68.2% sa
 
 **Hypothesis:** Warmup gives remasking more time to explore and correct early errors before locking. If early locking was premature (locking on noise), warmup should improve satisfaction. If most samples genuinely plateau before step 20, results will match R6.
 
+#### Results — Constraint Satisfaction
+
+| Config | Round | Overall | one_kitchen | kitchen_near_living | no_bath_kitchen | between_2_3_bath |
+|--------|-------|---------|------------|-------------------|----------------|-----------------|
+| No-remask + soft | R4 | **69.0%** | 100% | 100% | 74.7% | 93.8% |
+| Option A + lock (no warmup) | R6 | 60.5% | 100% | 100% | 69.0% | 90.7% |
+| Option B + lock (no warmup) | R6 | 68.2% | 100% | 100% | 75.7% | 91.7% |
+| Option A + lock + warmup=0.2 | **R6b** | 60.8% | 100% | 100% | 69.0% | 90.7% |
+| Option B + lock + warmup=0.2 | **R6b** | 68.2% | 100% | 100% | 75.7% | 91.7% |
+
+#### Results — Quality Comparison
+
+| Metric | No-remask guided (R4) | Lock A (R6b) | Lock B (R6b) |
+|--------|:---:|:---:|:---:|
+| Validity | 100% | 100% | 100% |
+| Inside validity | 99.8% | 99.8% | 99.8% |
+| Diversity | **0.905** | 0.742 | **0.772** |
+| Mode coverage (weighted) | **41.2%** | 33.1% | 40.7% |
+| Cond. edge TV (weighted) | 0.626 | 0.710 | **0.688** |
+| Node TV | **0.119** | 0.188 | 0.186 |
+| Transitivity | 99.9% | 100% | 100% |
+
+#### Findings
+
+1. **Warmup made no difference.** R6b results are identical to R6 within noise: Lock A 60.8% vs 60.5%, Lock B 68.2% vs 68.2%. Per-constraint satisfaction rates are also unchanged. The warmup hypothesis is rejected — early locking was not premature.
+
+2. **The EMA derivative criterion is not triggering on noise.** Since adding a 20-step warmup (preventing early derivative-based locks) had zero effect, the locks in R6 were genuine reward plateaus, not noisy false positives. The EMA smoothing (β=0.85) is already sufficient to filter early-step noise.
+
+3. **Lock B continues to match no-remask guided (R4).** At 68.2% vs 69.0%, the difference is within statistical noise (±4.2% std for R6b Lock B). The quality metrics are also comparable: mode coverage 40.7% vs 41.2%, cond. edge TV 0.688 vs 0.626.
+
+4. **Diversity remains the only penalty.** Lock B diversity (0.772) is below no-remask (0.905). This is inherent to the remasking-then-lock approach: early remasking disrupts guided diversity before the lock engages.
+
+#### Verdict — EMA lock investigation concluded
+
+The warmup experiment confirms that the lock mechanism is working as intended but provides no improvement over no-remasking. The fundamental issue is not *when* the lock triggers but *what happens after*: the abrupt transition from full remasking to zero remasking leaves no gradual error-correction mechanism.
+
+**The sigma_max analysis reveals the root cause** (see below): the loglinear noise schedule produces `sigma_max = 1.0` for all `t ≥ 0.5` (the entire first half of generation), meaning remasking is at maximum destructive intensity right up until the lock fires. There is no natural taper. The next direction is a **decay remasking schedule** that applies a multiplicative decay `sigma_max_eff(t) = sigma_max(t) * t^p` to gradually reduce remasking intensity, eliminating the need for the lock entirely.
+
 **Results saved to:** `eval_results/loglinear_noise_sc/round6b_guid/`
+
+### Decay Remasking Schedule
+
+#### Problem Statement
+
+The EMA lock mechanism uses an abrupt binary cutoff: once the EMA reward derivative plateaus, remasking is fully disabled for that sample. This creates two problems:
+
+1. **Abrupt transition**: remasking goes from full intensity to zero in one step. At the typical lock point (step 50-65, t=0.35-0.5), `sigma_max` is still 0.55-1.0, meaning remasking was flipping 50-94 tokens per step right before the lock silenced it entirely.
+
+2. **No error correction post-lock**: after the lock, the sample continues denoising with guidance but without any remasking. Errors present at the lock point propagate uncorrected to `t=0`. This is effectively the same as running with `no_remask` for the final 35-50% of steps.
+
+The root cause is that the loglinear noise schedule produces a `sigma_max` that stays at 1.0 for the first half of generation and decays too slowly in the second half to be compatible with guidance.
+
+#### Empirical Remasking Budget (Loglinear, 100 steps)
+
+```
+Step (i) |  t_now  | sigma_max | ~tokens remasked (of 94)
+---------|---------|-----------|-------------------------
+   95    |  0.960  |   1.000   |  94.0
+   80    |  0.810  |   1.000   |  94.0
+   65    |  0.660  |   1.000   |  94.0
+   50    |  0.510  |   1.000   |  94.0   <-- hard deadline
+   45    |  0.460  |   0.832   |  78.2
+   40    |  0.410  |   0.677   |  63.6
+   35    |  0.360  |   0.546   |  51.3   <-- typical EMA lock
+   30    |  0.310  |   0.434   |  40.8
+   20    |  0.210  |   0.253   |  23.8
+   10    |  0.110  |   0.112   |  10.5
+    5    |  0.060  |   0.053   |   5.0
+    0    |  0.010  |   0.000   |   0.0
+```
+
+Key insight: `sigma_max = 1.0` for all `t >= 0.5` (steps 0-50). Remasking is still extremely aggressive at the points where the lock typically fires. There is no natural taper to rely on.
+
+#### Design: Power-Law Decay
+
+Apply a multiplicative decay to `sigma_max`:
+
+```
+sigma_max_eff(t) = sigma_max(t) * t^p
+```
+
+This is a **static** schedule — purely a function of time `t`, not of guidance signals. It tapers remasking smoothly from full intensity at high `t` to near-zero at low `t`.
+
+Note: despite the name used in early design docs, this is not "guidance-aware" — it does not use feedback from the guidance process. A truly guidance-aware schedule would modulate remasking based on ESS, reward derivatives, or per-position importance weights (see Open Questions).
+
+With p=3 and 94 active positions:
+
+```
+Step |  t    | Baseline | p=3 tokens
+-----|-------|----------|----------
+  0  | 1.00  |  94.0    |  94.0
+ 30  | 0.70  |  94.0    |  32.2
+ 50  | 0.50  |  91.9    |  11.5
+ 65  | 0.35  |  49.1    |   2.1
+ 70  | 0.30  |  38.9    |   1.0
+ 80  | 0.20  |  22.3    |   0.2
+```
+
+Total remasking budget: baseline ~6700 token-remasks, p=3 ~1100 (~16%).
+
+#### Implementation
+
+- `RemaskingSchedule` in `bd_gen/diffusion/remasking.py`: new `decay_power` parameter. Applied as `sigma_max *= t_now ** decay_power` in `_compute_sigma_max()`.
+- `create_remasking_schedule()`: passes through `decay_power`.
+- CLI: `--remask-decay-power` in `scripts/generate_guided.py`.
+- The decay schedule and the EMA lock are **mutually exclusive** strategies. Use one or the other.
+
+#### Round 7: Decay Schedule (p=3) — Option A vs Option B
+
+##### Motivation
+
+Rounds 6-6b showed the EMA lock can nearly match no-remasking (68.2% vs 69%) but the abrupt binary transition is architecturally unsatisfying: it leaves no gradual error-correction and costs diversity. The decay schedule replaces the lock with a smooth `sigma_max *= t^3` taper that concentrates remasking in the early exploration phase and naturally fades to zero.
+
+##### Setup
+
+**Grid** (2 configs):
+
+| Config | Remasking | Mitigation | Decay | EMA lock |
+|--------|-----------|------------|-------|----------|
+| 7a (decayA) | confidence | Option A (fresh logits) | p=3 | off |
+| 7b (decayB) | confidence | Option B (protect just-unmasked) | p=3 | off |
+
+**Fixed**: K=16, alpha=0.01, soft reward, v1 loglinear, seeds=[42,123,456], 200 samples/seed.
+
+**Script**: `scripts/run_g5_round7.sh`
+
+##### Results
+
+*Pending — run `bash scripts/run_g5_round7.sh all` to generate.*
+
+**Results saved to:** `eval_results/loglinear_noise_sc/round7_guid/`

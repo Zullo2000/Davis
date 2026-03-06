@@ -229,6 +229,12 @@ def _parse_guidance_args() -> tuple[argparse.Namespace, list[str]]:
              "can trigger a lock (default: 0.0 = no warmup). "
              "During warmup, only the hard deadline can lock.",
     )
+    parser.add_argument(
+        "--remask-decay-power", type=float, default=0.0,
+        help="Power-law exponent for remasking decay schedule. "
+             "sigma_max *= t^p, tapering remasking at low t. "
+             "0 = no decay (default). Typical values: 2 or 3.",
+    )
 
     guidance_args, remaining = parser.parse_known_args()
     return guidance_args, remaining
@@ -323,6 +329,7 @@ def generate_guided_samples(
     remasking_fn = create_remasking_schedule(
         cfg.eval.remasking, noise_schedule, vocab_config,
         rate_network=rate_network,
+        decay_power=guidance_args.remask_decay_power,
     )
     if remasking_fn is not None:
         logger.info(
@@ -331,6 +338,11 @@ def generate_guided_samples(
             cfg.eval.remasking.eta,
             cfg.eval.remasking.get("t_switch", 1.0),
         )
+        if guidance_args.remask_decay_power > 0:
+            logger.info(
+                "Remasking decay schedule: p=%.1f",
+                guidance_args.remask_decay_power,
+            )
         if guidance_args.attribution_boost:
             logger.info("Attribution boost (Option C) enabled")
         if guidance_args.protect_just_unmasked:

@@ -7,7 +7,7 @@
 
 
 ## Overall Status
-- Current phase: G5 IN PROGRESS (Rounds 1–6; adaptive EMA lock implemented; Round 6 awaiting GPU run)
+- Current phase: G5 IN PROGRESS (Rounds 1–6b complete; decay remasking schedule implemented; Round 7 awaiting GPU run)
 - Dependencies: v1 pipeline complete, v2 (MELD) trained and evaluated
 
 ### Dependency Graph
@@ -236,11 +236,17 @@ Fine α sweep with revised constraints. Combines constraint revision + finer gri
    - Trajectories confirm persistent oscillation in all remasking variants.
    - **Conclusion**: Structural conflict — no single-step mitigation works. No-remask is best for SVDD.
    - Script: `run_g5_round5.sh`. Output: `comparison_guided_round5.md`.
-9. **Round 6 — Option A + EMA Lock vs Option B + EMA Lock** (2026-03-06): SCRIPT READY, awaiting GPU.
-   - Adaptive EMA lock: remasking ON early → lock when reward plateaus → no-remask late.
-   - Grid: 2 configs (Option A + lock, Option B + lock) at K=16, α=0.01.
+9. ~~**Round 6 — Option A + EMA Lock vs Option B + EMA Lock**~~ (2026-03-06): DONE.
+   - Lock B 68.2%, Lock A 60.5%. Lock B nearly matches no-remask (69%).
    - Results dir: `eval_results/loglinear_noise_sc/round6_guid/`
-10. Expand to v2 variants if warranted.
+10. ~~**Round 6b — EMA Lock + Warmup**~~ (2026-03-06): DONE.
+    - Warmup=0.2 made no difference. Verdict: abrupt lock transition is the fundamental limitation.
+    - Results dir: `eval_results/loglinear_noise_sc/round6b_guid/`
+11. **Round 7 — Decay Schedule (p=3) — Option A vs Option B**: SCRIPT READY, awaiting GPU.
+    - Power-law decay `sigma_max *= t^3` replaces EMA lock. Smooth taper.
+    - Grid: 2 configs (Option A + decay, Option B + decay) at K=16, α=0.01.
+    - Results dir: `eval_results/loglinear_noise_sc/round7_guid/`
+12. Expand to v2 variants if warranted.
 
 ### Option C — Reward-Attributed Confidence Boosting (2026-03-05)
 Implemented the mitigation for the guidance-remasking conflict: confidence remasking destroys guided positions (low model confidence = high attribution). Option C boosts confidence of reward-aligned just-unmasked positions before remasking.
@@ -310,9 +316,36 @@ Per-sample adaptive lock: start with remasking ON, track EMA(reward), lock (perm
 
 ### Round 6 — Option A + EMA Lock vs Option B + EMA Lock (2026-03-06)
 
-**Status:** Script ready, awaiting GPU run on jabiru.
-**Grid:** K=16, α=0.01, soft reward, confidence remasking + EMA lock. 2 configs: Option A + lock, Option B + lock.
+**Status:** DONE.
+**Result:** Lock B 68.2%, Lock A 60.5% — Lock B nearly matches no-remask (69%).
+**Grid:** K=16, α=0.01, soft reward, confidence remasking + EMA lock. 2 configs.
 **Results dir:** `eval_results/loglinear_noise_sc/round6_guid/`
+
+### Round 6b — EMA Lock + Warmup (2026-03-06)
+
+**Status:** DONE.
+**Result:** Warmup=0.2 made no difference (Lock B 68.2%, Lock A 60.8%). Hypothesis rejected — early locks were genuine reward plateaus.
+**Verdict:** Lock mechanism works as intended but provides no improvement over no-remasking. The abrupt binary transition leaves no gradual error-correction.
+**Results dir:** `eval_results/loglinear_noise_sc/round6b_guid/`
+
+### Decay Remasking Schedule (2026-03-06)
+
+Power-law decay on sigma_max: `sigma_max_eff(t) = sigma_max(t) * t^p`. Tapers remasking smoothly instead of abrupt EMA lock. With p=3: ~32 tokens at step 30, ~2 at step 65, ~0 at step 80. Replaces lock entirely.
+
+**Files modified:**
+- `bd_gen/diffusion/remasking.py` — new `decay_power` param on `RemaskingSchedule.__init__()` and `_compute_sigma_max()`, passed through `create_remasking_schedule()`
+- `scripts/generate_guided.py` — new `--remask-decay-power` CLI flag
+
+**Files created:**
+- `scripts/run_g5_round7.sh` — Round 7 experiment (Option A + decay p=3, Option B + decay p=3)
+
+**Backward compatibility:** `decay_power=0.0` default = no change.
+
+### Round 7 — Decay Schedule (p=3) — Option A vs Option B
+
+**Status:** Script ready, awaiting GPU run on jabiru.
+**Grid:** K=16, α=0.01, soft reward, confidence remasking + decay p=3 (no lock). 2 configs.
+**Results dir:** `eval_results/loglinear_noise_sc/round7_guid/`
 
 ### Files modified
 - `scripts/generate_guided.py` (added `--reward-mode`, `--calibration` CLI overrides)
