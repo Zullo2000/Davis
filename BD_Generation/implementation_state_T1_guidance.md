@@ -7,7 +7,7 @@
 
 
 ## Overall Status
-- Current phase: G5 IN PROGRESS (Rounds 1–6b complete; decay remasking schedule implemented; Round 7 awaiting GPU run)
+- Current phase: G5 IN PROGRESS (Rounds 1–6b complete; decay remasking schedule implemented; scoring vectorized for K≫16; Round 7 awaiting GPU run)
 - Dependencies: v1 pipeline complete, v2 (MELD) trained and evaluated
 
 ### Dependency Graph
@@ -347,6 +347,27 @@ Power-law decay on sigma_max: `sigma_max_eff(t) = sigma_max(t) * t^p`. Tapers re
 **Grid:** K=16, α=0.01, soft reward, confidence remasking + decay p=3 (no lock). 2 configs.
 **Results dir:** `eval_results/loglinear_noise_sc/round7_guid/`
 
+### Vectorized K-Candidate Scoring (2026-03-06)
+
+Replaced the Python double loop `for k in K: for b in B:` in soft scoring with fully batched tensor operations. Scoring time is now nearly independent of K, enabling K=50+ experiments.
+
+**What changed:**
+- `_compute_adj_terms_batch()` in `soft_violations.py` — batched `(KB, n_max, V)` → `(KB, n_edges)` adjacency terms
+- `soft_violation_batch()` on all 4 constraint classes (ExactCount, CountRange, RequireAdj, ForbidAdj) — `(KB, ...)` → `(KB,)` violations
+- `compute_reward_soft_batch()` on `RewardComposer` — loops over 4 constraints (not K*B), returns `(KB,)` rewards
+- `_score_candidates_soft()` and `_score_single_soft()` in `guided_sampler.py` — replaced K*B Python loop with single call to `build_effective_probs_batch` + `compute_reward_soft_batch`
+
+**Files modified:**
+- `bd_gen/guidance/soft_violations.py` — added `_compute_adj_terms_batch()`
+- `bd_gen/guidance/constraints.py` — added `soft_violation_batch()` ABC method + 4 implementations
+- `bd_gen/guidance/reward.py` — added `compute_energy_soft_batch()`, `compute_reward_soft_batch()`
+- `bd_gen/guidance/guided_sampler.py` — replaced `_score_candidates_soft`, `_score_single_soft` with batched versions
+- `docs/guidance.md` — updated compute cost table
+
+**Tests:** 8 new tests in `test_soft_violations.py` (batched adj_terms, all 4 constraint batch, composer batch, committed graph batch). Full suite: 747 passed, no regressions.
+
+**Backward compatibility:** All single-sample methods preserved. Hard mode scoring unchanged (not vectorized — only soft mode used).
+
 ### Files modified
 - `scripts/generate_guided.py` (added `--reward-mode`, `--calibration` CLI overrides)
 - `eval_results/save_utils.py` (added `_build_constraint_table()` for dynamic constraint metrics in comparison, added guidance config params to config table)
@@ -362,7 +383,7 @@ Power-law decay on sigma_max: `sigma_max_eff(t) = sigma_max(t) * t^p`. Tapers re
 - `scripts/analyze_guidance_stats.py` (trajectory diagnostics + soft/hard comparison)
 
 ### Test results
-- 114 guidance tests: **all pass** (no regressions from analysis pipeline or constraint config changes)
+- 122 guidance tests: **all pass** (114 existing + 8 new batched scoring tests, no regressions)
 
 ### Parallelization
 Round 2: 4 α × 2 K = 8 configs (single variant, soft reward). Future full grid: 4 variants × N α × M K, independent GPU runs.

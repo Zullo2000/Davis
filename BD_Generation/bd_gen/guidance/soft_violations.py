@@ -246,3 +246,49 @@ def _compute_adj_terms(
     p_ij[edge_pad] = 0.0
 
     return p_ij
+
+
+def _compute_adj_terms_batch(
+    node_probs: Tensor,
+    edge_probs: Tensor,
+    pad_mask: Tensor,
+    vocab_config: VocabConfig,
+    type_a_idx: int,
+    type_b_idx: int,
+) -> Tensor:
+    """Batched version of :func:`_compute_adj_terms`.
+
+    Args:
+        node_probs: ``(KB, n_max, NODE_VOCAB_SIZE)`` float64.
+        edge_probs: ``(KB, n_edges, EDGE_VOCAB_SIZE)`` float64.
+        pad_mask: ``(KB, seq_len)`` bool.
+        vocab_config: Vocabulary configuration.
+        type_a_idx: Room type index for the first type.
+        type_b_idx: Room type index for the second type.
+
+    Returns:
+        ``(KB, n_edges)`` float64 tensor of per-edge-position probabilities.
+    """
+    n_max = vocab_config.n_max
+
+    i_indices, j_indices = torch.triu_indices(n_max, n_max, offset=1)
+
+    q_i_a = node_probs[:, i_indices, type_a_idx]  # (KB, n_edges)
+    q_j_b = node_probs[:, j_indices, type_b_idx]  # (KB, n_edges)
+
+    if type_a_idx == type_b_idx:
+        p_types = q_i_a * q_j_b
+    else:
+        q_i_b = node_probs[:, i_indices, type_b_idx]
+        q_j_a = node_probs[:, j_indices, type_a_idx]
+        p_types = q_i_a * q_j_b + q_i_b * q_j_a
+
+    p_adj = edge_probs[:, :, :EDGE_NO_EDGE_IDX].sum(dim=-1)  # (KB, n_edges)
+
+    p_ij = p_types * p_adj  # (KB, n_edges)
+
+    # Zero out PAD edge positions
+    edge_pad = ~pad_mask[:, n_max:]  # (KB, n_edges)
+    p_ij = torch.where(edge_pad, torch.zeros_like(p_ij), p_ij)
+
+    return p_ij

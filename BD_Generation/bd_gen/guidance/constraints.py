@@ -21,7 +21,7 @@ import torch
 from torch import Tensor
 
 from bd_gen.data.vocab import VocabConfig
-from bd_gen.guidance.soft_violations import _compute_adj_terms
+from bd_gen.guidance.soft_violations import _compute_adj_terms, _compute_adj_terms_batch
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +93,26 @@ class Constraint(ABC):
             Scalar tensor >= 0 (float64).
         """
 
+    @abstractmethod
+    def soft_violation_batch(
+        self,
+        node_probs: Tensor,
+        edge_probs: Tensor,
+        pad_mask: Tensor,
+        vocab_config: VocabConfig,
+    ) -> Tensor:
+        """Batched version of :meth:`soft_violation`.
+
+        Args:
+            node_probs: (KB, n_max, NODE_VOCAB_SIZE) per-position distributions.
+            edge_probs: (KB, n_edges, EDGE_VOCAB_SIZE) per-position distributions.
+            pad_mask: (KB, seq_len) bool — True for real positions.
+            vocab_config: Vocabulary configuration.
+
+        Returns:
+            (KB,) tensor >= 0 (float64).
+        """
+
 
 # ---------------------------------------------------------------------------
 # ExactCount
@@ -138,6 +158,18 @@ class ExactCount(Constraint):
         active = pad_mask[: vocab_config.n_max].double()  # (n_max,)
         q_type = node_probs[:, self.room_type_idx]  # (n_max,)
         n_hat = (q_type * active).sum()
+        return torch.abs(n_hat - self.target)
+
+    def soft_violation_batch(
+        self,
+        node_probs: Tensor,
+        edge_probs: Tensor,
+        pad_mask: Tensor,
+        vocab_config: VocabConfig,
+    ) -> Tensor:
+        active = pad_mask[:, : vocab_config.n_max].double()  # (KB, n_max)
+        q_type = node_probs[:, :, self.room_type_idx]  # (KB, n_max)
+        n_hat = (q_type * active).sum(dim=-1)  # (KB,)
         return torch.abs(n_hat - self.target)
 
 
@@ -192,6 +224,18 @@ class CountRange(Constraint):
         lo_t = torch.tensor(self.lo, dtype=torch.float64)
         hi_t = torch.tensor(self.hi, dtype=torch.float64)
         return torch.clamp(lo_t - n_hat, min=0.0) + torch.clamp(n_hat - hi_t, min=0.0)
+
+    def soft_violation_batch(
+        self,
+        node_probs: Tensor,
+        edge_probs: Tensor,
+        pad_mask: Tensor,
+        vocab_config: VocabConfig,
+    ) -> Tensor:
+        active = pad_mask[:, : vocab_config.n_max].double()  # (KB, n_max)
+        q_type = node_probs[:, :, self.room_type_idx]  # (KB, n_max)
+        n_hat = (q_type * active).sum(dim=-1)  # (KB,)
+        return torch.clamp(self.lo - n_hat, min=0.0) + torch.clamp(n_hat - self.hi, min=0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +312,23 @@ class RequireAdj(Constraint):
         p_exists = 1.0 - torch.exp(log_complement.sum())
         return 1.0 - p_exists
 
+    def soft_violation_batch(
+        self,
+        node_probs: Tensor,
+        edge_probs: Tensor,
+        pad_mask: Tensor,
+        vocab_config: VocabConfig,
+    ) -> Tensor:
+        p_ij = _compute_adj_terms_batch(
+            node_probs, edge_probs, pad_mask, vocab_config,
+            self.type_a_idx, self.type_b_idx,
+        )  # (KB, n_edges)
+        eps = 1e-15
+        p_ij_clamped = torch.clamp(p_ij, min=0.0, max=1.0 - eps)
+        log_complement = torch.log1p(-p_ij_clamped)  # (KB, n_edges)
+        p_exists = 1.0 - torch.exp(log_complement.sum(dim=-1))  # (KB,)
+        return 1.0 - p_exists
+
 
 # ---------------------------------------------------------------------------
 # ForbidAdj
@@ -332,3 +393,16 @@ class ForbidAdj(Constraint):
             self.type_a_idx, self.type_b_idx,
         )
         return p_ij.sum()
+
+    def soft_violation_batch(
+        self,
+        node_probs: Tensor,
+        edge_probs: Tensor,
+        pad_mask: Tensor,
+        vocab_config: VocabConfig,
+    ) -> Tensor:
+        p_ij = _compute_adj_terms_batch(
+            node_probs, edge_probs, pad_mask, vocab_config,
+            self.type_a_idx, self.type_b_idx,
+        )  # (KB, n_edges)
+        return p_ij.sum(dim=-1)  # (KB,)

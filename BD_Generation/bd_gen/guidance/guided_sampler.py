@@ -37,6 +37,7 @@ from bd_gen.diffusion.sampling import _clamp_pad, _single_step_remask, _single_s
 from bd_gen.guidance.reward import RewardComposer
 from bd_gen.guidance.soft_violations import (
     build_effective_probs,
+    build_effective_probs_batch,
     hard_decode_x0,
 )
 
@@ -112,6 +113,9 @@ def _score_candidates_soft(
 ) -> tuple[Tensor, dict[str, Tensor]]:
     """Score K*B candidates using soft (posterior expectation) violations.
 
+    Fully vectorized: builds effective probs and computes violations for
+    all K*B candidates in a single batched pass (no Python loops over K or B).
+
     Args:
         candidates: (K, B, SEQ_LEN) candidate tokens after unmasking.
         node_logits: (B, n_max, NODE_V) shared logits from single model call.
@@ -126,30 +130,28 @@ def _score_candidates_soft(
         (rewards, per_constraint_violations) where rewards is (K, B) float64
         and per_constraint_violations is {name: (K, B) float64}.
     """
-    device = candidates.device
-    constraint_names = [c.name for c in composer.constraints]
-    rewards = torch.zeros(K, B, dtype=torch.float64, device=device)
-    per_violations: dict[str, Tensor] = {
-        name: torch.zeros(K, B, dtype=torch.float64, device=device) for name in constraint_names
-    }
+    KB = K * B
+    seq_len = candidates.shape[-1]
 
-    for k in range(K):
-        for b in range(B):
-            node_probs, edge_probs = build_effective_probs(
-                candidates[k, b],
-                node_logits[b],
-                edge_logits[b],
-                pad_mask[b],
-                vocab_config,
-            )
-            reward, violations = composer.compute_reward_soft(
-                node_probs, edge_probs, pad_mask[b], vocab_config,
-            )
-            rewards[k, b] = reward
-            for name in constraint_names:
-                if name in violations:
-                    per_violations[name][k, b] = violations[name]
+    # Flatten candidates to (KB, SEQ) and expand shared tensors
+    cands_flat = candidates.view(KB, seq_len)
+    node_logits_exp = node_logits.repeat(K, 1, 1)  # (KB, n_max, V)
+    edge_logits_exp = edge_logits.repeat(K, 1, 1)  # (KB, n_edges, V)
+    pad_exp = pad_mask.repeat(K, 1)  # (KB, SEQ)
 
+    # Build effective probs for all KB candidates at once
+    node_probs, edge_probs = build_effective_probs_batch(
+        cands_flat, node_logits_exp, edge_logits_exp, pad_exp, vocab_config,
+    )
+
+    # Batched reward computation
+    rewards_flat, violations_flat = composer.compute_reward_soft_batch(
+        node_probs, edge_probs, pad_exp, vocab_config,
+    )
+
+    # Reshape to (K, B)
+    rewards = rewards_flat.view(K, B)
+    per_violations = {name: v.view(K, B) for name, v in violations_flat.items()}
     return rewards, per_violations
 
 
@@ -204,15 +206,12 @@ def _score_single_soft(
     B: int,
 ) -> Tensor:
     """Score B samples in soft mode. Returns (B,) float64 rewards."""
-    rewards = torch.zeros(B, dtype=torch.float64, device=x_t.device)
-    for b in range(B):
-        node_probs, edge_probs = build_effective_probs(
-            x_t[b], node_logits[b], edge_logits[b], pad_mask[b], vocab_config,
-        )
-        r, _ = composer.compute_reward_soft(
-            node_probs, edge_probs, pad_mask[b], vocab_config,
-        )
-        rewards[b] = r
+    node_probs, edge_probs = build_effective_probs_batch(
+        x_t, node_logits, edge_logits, pad_mask, vocab_config,
+    )
+    rewards, _ = composer.compute_reward_soft_batch(
+        node_probs, edge_probs, pad_mask, vocab_config,
+    )
     return rewards
 
 

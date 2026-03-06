@@ -833,3 +833,186 @@ class TestRewardComposerSoftMode:
         )
         assert energy.item() == 0.0
         assert energy.dtype == torch.float64
+
+
+# =========================================================================
+# Batched scoring tests — _compute_adj_terms_batch + soft_violation_batch
+# =========================================================================
+
+from bd_gen.guidance.soft_violations import _compute_adj_terms, _compute_adj_terms_batch
+
+
+class TestComputeAdjTermsBatch:
+    """Tests for _compute_adj_terms_batch matching _compute_adj_terms."""
+
+    def test_batch_matches_single(self, vc):
+        """Batched adj_terms matches per-sample computation."""
+        B = 4
+        num_rooms_list = [2, 4, 6, 8]
+        torch.manual_seed(42)
+
+        x_t_list = [_make_all_mask_tokens(vc, nr) for nr in num_rooms_list]
+        x_t_batch = torch.stack(x_t_list)
+        pad_mask_batch = torch.stack([vc.compute_pad_mask(nr) for nr in num_rooms_list])
+
+        node_logits_batch = torch.randn(B, vc.n_max, NODE_VOCAB_SIZE, dtype=torch.float64)
+        edge_logits_batch = torch.randn(B, vc.n_edges, EDGE_VOCAB_SIZE, dtype=torch.float64)
+
+        node_probs_b, edge_probs_b = build_effective_probs_batch(
+            x_t_batch, node_logits_batch, edge_logits_batch, pad_mask_batch, vc
+        )
+
+        type_a, type_b = 2, 0  # Kitchen, LivingRoom
+        result_batch = _compute_adj_terms_batch(
+            node_probs_b, edge_probs_b, pad_mask_batch, vc, type_a, type_b,
+        )
+        assert result_batch.shape == (B, vc.n_edges)
+
+        for b in range(B):
+            node_probs_s, edge_probs_s = build_effective_probs(
+                x_t_batch[b], node_logits_batch[b], edge_logits_batch[b],
+                pad_mask_batch[b], vc,
+            )
+            result_single = _compute_adj_terms(
+                node_probs_s, edge_probs_s, pad_mask_batch[b], vc, type_a, type_b,
+            )
+            assert torch.allclose(result_batch[b], result_single, atol=1e-12)
+
+    def test_same_type_pair(self, vc):
+        """Batched adj_terms with same type for both endpoints."""
+        B = 2
+        torch.manual_seed(99)
+        x_t_batch = torch.stack([_make_all_mask_tokens(vc, 4)] * B)
+        pad_mask_batch = torch.stack([vc.compute_pad_mask(4)] * B)
+        node_logits = torch.randn(B, vc.n_max, NODE_VOCAB_SIZE, dtype=torch.float64)
+        edge_logits = torch.randn(B, vc.n_edges, EDGE_VOCAB_SIZE, dtype=torch.float64)
+
+        node_probs, edge_probs = build_effective_probs_batch(
+            x_t_batch, node_logits, edge_logits, pad_mask_batch, vc,
+        )
+
+        result = _compute_adj_terms_batch(
+            node_probs, edge_probs, pad_mask_batch, vc, 3, 3,  # Bathroom-Bathroom
+        )
+        assert result.shape == (B, vc.n_edges)
+        assert (result >= 0).all()
+
+
+class TestSoftViolationBatch:
+    """Tests that soft_violation_batch matches per-sample soft_violation."""
+
+    @pytest.fixture
+    def batch_data(self, vc):
+        """Create batched test data with varied num_rooms."""
+        B = 5
+        num_rooms_list = [2, 3, 4, 6, 8]
+        torch.manual_seed(42)
+
+        x_t_list = [_make_all_mask_tokens(vc, nr) for nr in num_rooms_list]
+        x_t_batch = torch.stack(x_t_list)
+        pad_mask_batch = torch.stack([vc.compute_pad_mask(nr) for nr in num_rooms_list])
+        node_logits = torch.randn(B, vc.n_max, NODE_VOCAB_SIZE, dtype=torch.float64)
+        edge_logits = torch.randn(B, vc.n_edges, EDGE_VOCAB_SIZE, dtype=torch.float64)
+
+        node_probs, edge_probs = build_effective_probs_batch(
+            x_t_batch, node_logits, edge_logits, pad_mask_batch, vc,
+        )
+        return node_probs, edge_probs, pad_mask_batch, B
+
+    def test_exact_count_batch(self, vc, batch_data):
+        """ExactCount batch matches per-sample."""
+        node_probs, edge_probs, pad_mask, B = batch_data
+        c = ExactCount(name="ec", room_type_idx=2, target=1)
+
+        batch_result = c.soft_violation_batch(node_probs, edge_probs, pad_mask, vc)
+        assert batch_result.shape == (B,)
+        assert batch_result.dtype == torch.float64
+
+        for b in range(B):
+            single = c.soft_violation(node_probs[b], edge_probs[b], pad_mask[b], vc)
+            assert batch_result[b].item() == pytest.approx(single.item(), abs=1e-12)
+
+    def test_count_range_batch(self, vc, batch_data):
+        """CountRange batch matches per-sample."""
+        node_probs, edge_probs, pad_mask, B = batch_data
+        c = CountRange(name="cr", room_type_idx=3, lo=2, hi=3)
+
+        batch_result = c.soft_violation_batch(node_probs, edge_probs, pad_mask, vc)
+        assert batch_result.shape == (B,)
+
+        for b in range(B):
+            single = c.soft_violation(node_probs[b], edge_probs[b], pad_mask[b], vc)
+            assert batch_result[b].item() == pytest.approx(single.item(), abs=1e-12)
+
+    def test_require_adj_batch(self, vc, batch_data):
+        """RequireAdj batch matches per-sample."""
+        node_probs, edge_probs, pad_mask, B = batch_data
+        c = RequireAdj(name="ra", type_a_idx=2, type_b_idx=0)
+
+        batch_result = c.soft_violation_batch(node_probs, edge_probs, pad_mask, vc)
+        assert batch_result.shape == (B,)
+
+        for b in range(B):
+            single = c.soft_violation(node_probs[b], edge_probs[b], pad_mask[b], vc)
+            assert batch_result[b].item() == pytest.approx(single.item(), abs=1e-12)
+
+    def test_forbid_adj_batch(self, vc, batch_data):
+        """ForbidAdj batch matches per-sample."""
+        node_probs, edge_probs, pad_mask, B = batch_data
+        c = ForbidAdj(name="fa", type_a_idx=3, type_b_idx=2)
+
+        batch_result = c.soft_violation_batch(node_probs, edge_probs, pad_mask, vc)
+        assert batch_result.shape == (B,)
+
+        for b in range(B):
+            single = c.soft_violation(node_probs[b], edge_probs[b], pad_mask[b], vc)
+            assert batch_result[b].item() == pytest.approx(single.item(), abs=1e-12)
+
+    def test_reward_composer_batch(self, vc, batch_data):
+        """RewardComposer batched reward matches per-sample."""
+        node_probs, edge_probs, pad_mask, B = batch_data
+        constraints = [
+            ExactCount(name="one_kitchen", room_type_idx=2, target=1),
+            CountRange(name="bath_range", room_type_idx=3, lo=2, hi=3),
+            RequireAdj(name="kit_near_lr", type_a_idx=2, type_b_idx=0),
+            ForbidAdj(name="no_bath_kit", type_a_idx=3, type_b_idx=2),
+        ]
+        composer = RewardComposer(constraints=constraints, phi="linear")
+
+        rewards_batch, violations_batch = composer.compute_reward_soft_batch(
+            node_probs, edge_probs, pad_mask, vc,
+        )
+        assert rewards_batch.shape == (B,)
+        assert rewards_batch.dtype == torch.float64
+
+        for b in range(B):
+            r_single, v_single = composer.compute_reward_soft(
+                node_probs[b], edge_probs[b], pad_mask[b], vc,
+            )
+            assert rewards_batch[b].item() == pytest.approx(r_single.item(), abs=1e-12)
+            for name in violations_batch:
+                assert violations_batch[name][b].item() == pytest.approx(
+                    v_single[name].item(), abs=1e-12
+                )
+
+    def test_batch_with_committed_graph(self, vc):
+        """Batched violations on committed graphs match hard violations."""
+        x_t, node_logits, edge_logits, pad_mask, graph_dict = _make_committed_graph(vc)
+
+        # Stack 3 copies
+        B = 3
+        x_t_batch = x_t.unsqueeze(0).expand(B, -1)
+        node_logits_batch = node_logits.unsqueeze(0).expand(B, -1, -1)
+        edge_logits_batch = edge_logits.unsqueeze(0).expand(B, -1, -1)
+        pad_mask_batch = pad_mask.unsqueeze(0).expand(B, -1)
+
+        node_probs, edge_probs = build_effective_probs_batch(
+            x_t_batch, node_logits_batch, edge_logits_batch, pad_mask_batch, vc,
+        )
+
+        c = ExactCount(name="ec", room_type_idx=2, target=1)
+        batch_result = c.soft_violation_batch(node_probs, edge_probs, pad_mask_batch, vc)
+
+        hard_result = c.hard_violation(graph_dict)
+        for b in range(B):
+            assert batch_result[b].item() == pytest.approx(hard_result.violation, abs=1e-10)

@@ -142,6 +142,66 @@ class RewardComposer:
         )
         return -energy, violation_details
 
+    def compute_energy_soft_batch(
+        self,
+        node_probs: Tensor,
+        edge_probs: Tensor,
+        pad_mask: Tensor,
+        vocab_config: VocabConfig,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Batched E(x) = Σ (λ_i / p90_i) * φ(v_i(x)) on posterior distributions.
+
+        Args:
+            node_probs: (KB, n_max, NODE_VOCAB_SIZE) float64.
+            edge_probs: (KB, n_edges, EDGE_VOCAB_SIZE) float64.
+            pad_mask: (KB, seq_len) bool.
+            vocab_config: Vocabulary configuration.
+
+        Returns:
+            (energy, violations) where energy is (KB,) float64 and
+            violations is {constraint_name: (KB,) float64}.
+        """
+        KB = node_probs.shape[0]
+        violation_details: dict[str, Tensor] = {}
+        energy: Tensor | None = None
+
+        for constraint in self.constraints:
+            violation = constraint.soft_violation_batch(
+                node_probs, edge_probs, pad_mask, vocab_config,
+            )  # (KB,)
+            violation_details[constraint.name] = violation
+
+            weight = float(constraint.weight)
+            p90 = float(constraint.p90_normalizer)
+
+            term = (weight / p90) * self._apply_phi_tensor(violation)
+
+            if energy is None:
+                energy = term
+            else:
+                energy = energy + term
+
+        if energy is None:
+            energy = torch.zeros(KB, dtype=torch.float64, device=node_probs.device)
+
+        return energy, violation_details
+
+    def compute_reward_soft_batch(
+        self,
+        node_probs: Tensor,
+        edge_probs: Tensor,
+        pad_mask: Tensor,
+        vocab_config: VocabConfig,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Batched r(x) = -E(x) on posterior distributions.
+
+        Returns ((KB,) rewards, {constraint_name: (KB,) violations}).
+        """
+        energy, violation_details = self.compute_energy_soft_batch(
+            node_probs, edge_probs, pad_mask, vocab_config,
+        )
+        return -energy, violation_details
+
     def load_calibration(self, calibration: dict[str, float]) -> None:
         """Set P90 normalizers from calibration dict.
 

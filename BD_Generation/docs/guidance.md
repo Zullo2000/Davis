@@ -211,11 +211,11 @@ Guidance-specific args (`--guidance-config`, `--alpha`, `--K`, `--guidance-tag`)
 
 | K | Model calls per step | Scoring per step | Total overhead vs unguided |
 |---|---------------------|-----------------|---------------------------|
-| 1 | 1 (shared) | B scores | ~1x (negligible) |
-| 8 | 1 (shared) | 8×B scores | ~1x model + 8x scoring |
-| 16 | 1 (shared) | 16×B scores | ~1x model + 16x scoring |
+| 1 | 1 (shared) | 1 batched call | ~1x (negligible) |
+| 16 | 1 (shared) | 1 batched call | ~1x model + minor scoring |
+| 50 | 1 (shared) | 1 batched call | ~1x model + minor scoring |
 
-The model call is shared across all K candidates (the bottleneck). Scoring is a Python loop over K×B — acceptable for K≤16, B≤64. Vectorized scoring is a future optimization.
+The model call is shared across all K candidates (the bottleneck). Scoring is fully vectorized: `build_effective_probs_batch` + `compute_reward_soft_batch` process all K×B candidates in a single batched tensor operation. Scoring time is nearly independent of K — the overhead is dominated by the model forward pass.
 
 ## Gradual Discoveries — Design Choices & Tuning
 
@@ -1240,6 +1240,36 @@ Rounds 6-6b showed the EMA lock can nearly match no-remasking (68.2% vs 69%) but
 
 ##### Results
 
-*Pending — run `bash scripts/run_g5_round7.sh all` to generate.*
+**Constraint Satisfaction** (best configs from each approach, for comparison):
+
+| Metric | No-Remask Guided (R3, a=0.01) | Lock B (R6b) | Decay B (R7, p=3) | Decay A (R7, p=3) |
+|--------|:---:|:---:|:---:|:---:|
+| **Satisfaction (all)** | **69.0%** | **68.2%** | **58.2%** | **54.2%** |
+| between_2_and_3_bathrooms | 93.8% | 89.5% | 88.5% | 89.0% |
+| kitchen_near_living | 100% | 100% | 100% | 100% |
+| no_bath_kitchen | 74.7% | 69.7% | 69.0% | 64.2% |
+| one_kitchen | 100% | 100% | 100% | 100% |
+
+**Quality (Distribution Fidelity)**:
+
+| Metric | No-Remask Guided (R3, a=0.01) | Lock B (R6b) | Decay B (R7, p=3) | Decay A (R7, p=3) | Unguided Baseline |
+|--------|:---:|:---:|:---:|:---:|:---:|
+| Diversity | 0.905 | 0.772 | 0.723 | 0.685 | 0.945 |
+| Mode coverage (weighted) | 41.2% | 40.7% | 42.1% | 41.3% | 69.6% |
+| Cond. edge TV | 0.626 | 0.688 | 0.677 | 0.691 | 0.472 |
+| Type-cond. degree TV | 0.203 | 0.217 | 0.219 | 0.223 | 0.159 |
+| Node TV | 0.160 | 0.182 | 0.183 | 0.186 | 0.119 |
+| Spatial transitivity | 100% | 100% | 100% | 100% | 99.9% |
+| Inside validity | 99.8% | 99.8% | 100% | 99.8% | 99.4% |
+
+##### Analysis
+
+1. **No-remask guided remains the best** at 69.0% overall satisfaction. Nothing has beaten it.
+2. **Lock B (R6b) came closest** at 68.2% — only 0.8pp behind.
+3. **Decay B regressed significantly** to 58.2% — a ~10pp drop from Lock B. The static power-law decay (p=3) still allows substantial remasking in the mid-range (steps 30–50) where guidance gains are being made, while the lock would have already shut off remasking for well-guided samples.
+4. **Quality metrics are similar** across all guided configs (~40–42% mode coverage, similar TV distances). The quality cost of guidance is consistent regardless of remasking strategy.
+5. **Core problem**: the decay schedule is a one-size-fits-all time function. It doesn't adapt per-sample like the EMA lock does. A sample that converges fast still gets remasked at the same rate as one that hasn't converged — confirming this is "just a new remasking schedule", not guidance-aware.
+
+**Conclusion**: The EMA lock (R6b) remains the best approach for combining remasking with guidance. The static decay experiment confirms that per-sample adaptivity matters more than a smooth global taper.
 
 **Results saved to:** `eval_results/loglinear_noise_sc/round7_guid/`
