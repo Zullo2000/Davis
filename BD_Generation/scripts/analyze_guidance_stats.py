@@ -673,7 +673,7 @@ def _extract_sample_trajectory(
     batch_steps = batches[batch_idx]
 
     result: dict[str, list[float]] = {}
-    for step in batch_steps:
+    for step_i, step in enumerate(batch_steps):
         for key in ["ess", "reward_selected", "reward_all_candidates",
                      "reward_pre_remask", "reward_post_remask"]:
             if key not in step:
@@ -710,6 +710,22 @@ def _extract_sample_trajectory(
                         result.setdefault(f"violation_{vname}", []).append(
                             vvals[local_idx].item()
                         )
+
+        # EMA reward (from adaptive lock)
+        if "ema_reward" in step:
+            val = step["ema_reward"]
+            if val is not None and isinstance(val, torch.Tensor):
+                if local_idx < val.numel():
+                    result.setdefault("ema_reward", []).append(
+                        val[local_idx].item()
+                    )
+
+        # Lock step detection (first step where locked becomes True)
+        if "_lock_step" not in result and "locked" in step:
+            val = step["locked"]
+            if val is not None and isinstance(val, torch.Tensor):
+                if local_idx < val.numel() and val[local_idx].item():
+                    result["_lock_step"] = step_i
 
     return result
 
@@ -773,6 +789,32 @@ def _plot_trajectory_figure(
                     linewidth=1.2, alpha=0.85,
                     label=sample_label,
                 )
+
+        # Overlay EMA on reward_selected subplot
+        if key == "reward_selected":
+            for ci, (sample_label, traj) in enumerate(trajectories.items()):
+                if "ema_reward" in traj and isinstance(traj["ema_reward"], list):
+                    ax.plot(
+                        range(len(traj["ema_reward"])),
+                        traj["ema_reward"],
+                        color=colors[ci % len(colors)],
+                        linewidth=1.5, alpha=0.7,
+                        linestyle="--",
+                        label=f"EMA",
+                    )
+
+        # Lock step dashed vertical line on all subplots
+        lock_drawn = False
+        for ci, (sample_label, traj) in enumerate(trajectories.items()):
+            if "_lock_step" in traj:
+                ls = traj["_lock_step"]
+                ax.axvline(
+                    x=ls, color=colors[ci % len(colors)],
+                    linestyle="--", linewidth=1.0, alpha=0.6,
+                    label="t_lock" if not lock_drawn else None,
+                )
+                lock_drawn = True
+
         ax.set_xlabel("Denoising step")
         ax.set_ylabel(label)
         ax.set_title(label)

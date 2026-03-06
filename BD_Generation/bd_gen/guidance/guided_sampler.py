@@ -65,6 +65,7 @@ class GuidanceStatsStep(TypedDict):
     violations: dict[str, float]
     mean_attribution_boost: float
     positions_boosted: float
+    samples_locked: float
 
 
 class GuidanceStatsStepPerSample(TypedDict):
@@ -76,6 +77,8 @@ class GuidanceStatsStepPerSample(TypedDict):
     reward_pre_remask: Tensor  # (B,)
     reward_post_remask: Tensor  # (B,)
     violations: dict[str, Tensor]  # name -> (B,)
+    ema_reward: Tensor | None  # (B,) or None
+    locked: Tensor | None  # (B,) bool or None
 
 
 @dataclass
@@ -89,6 +92,7 @@ class GuidanceStats:
     final_mean_violation_when_failed: dict[str, float] = field(default_factory=dict)
     final_violation_histograms: dict[str, dict[str, int]] = field(default_factory=dict)
     satisfaction_overall: float = 0.0
+    lock_steps: Tensor | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +339,10 @@ def guided_sample(
     attribution_boost: bool = False,
     protect_just_unmasked: bool = False,
     fresh_logits_for_remask: bool = False,
+    ema_lock: bool = False,
+    ema_beta: float = 0.85,
+    ema_lock_consecutive: int = 3,
+    ema_lock_deadline: float = 0.5,
     rate_network: torch.nn.Module | None = None,
     num_rooms_distribution: Tensor | None = None,
     fixed_num_rooms: int | None = None,
@@ -380,6 +388,15 @@ def guided_sample(
             run the model a second time on the post-unmask winner and use
             fresh logits for the remasking decision (Option A). 2x model
             cost per step.
+        ema_lock: If True, adaptively disable remasking per-sample when
+            EMA(reward) stops improving.  Lock fires when d(EMA) <= 0
+            for ``ema_lock_consecutive`` consecutive steps, or at the
+            hard deadline ``ema_lock_deadline``.
+        ema_beta: EMA smoothing factor (default 0.85).
+        ema_lock_consecutive: Number of consecutive non-positive EMA
+            derivatives to trigger lock (default 3).
+        ema_lock_deadline: Hard deadline as fraction of total steps
+            (default 0.5 = lock by step 50/100).
         rate_network: Optional v2 rate network.
         num_rooms_distribution: Room count distribution.
         fixed_num_rooms: Fixed room count.
@@ -426,6 +443,15 @@ def guided_sample(
         torch.tensor(EDGE_MASK_IDX, dtype=torch.long, device=device),
         torch.tensor(EDGE_PAD_IDX, dtype=torch.long, device=device),
     )
+
+    # --- EMA lock state ---
+    if ema_lock:
+        ema_r: Tensor | None = None
+        ema_r_prev: Tensor | None = None
+        ema_streak = torch.zeros(B, dtype=torch.long, device=device)
+        ema_locked = torch.zeros(B, dtype=torch.bool, device=device)
+        ema_lock_step = torch.full((B,), -1, dtype=torch.long)
+        ema_deadline = int(ema_lock_deadline * num_steps)
 
     # --- Step 4: Reverse loop with K-candidate reweighting ---
     for i in range(num_steps - 1, -1, -1):
@@ -519,6 +545,28 @@ def guided_sample(
         # Record pre-remask reward
         reward_pre = rewards[selected_k, torch.arange(B)]  # (B,)
 
+        # --- EMA lock update ---
+        if ema_lock:
+            step_idx = num_steps - 1 - i
+            r = reward_pre.double()  # (B,)
+            if ema_r is None:
+                ema_r = r.clone()
+            else:
+                ema_r_prev = ema_r.clone()
+                ema_r = ema_beta * ema_r + (1 - ema_beta) * r
+                d_ema = ema_r - ema_r_prev  # (B,)
+                non_positive = d_ema <= 0
+                ema_streak = torch.where(
+                    non_positive, ema_streak + 1,
+                    torch.zeros_like(ema_streak),
+                )
+                new_locks = (~ema_locked) & (
+                    (ema_streak >= ema_lock_consecutive)
+                    | (step_idx >= ema_deadline)
+                )
+                ema_lock_step[new_locks] = step_idx
+                ema_locked = ema_locked | new_locks
+
         # 4i-pre. Compute attribution boost (Option C)
         conf_boost = None
         if attribution_boost and remasking_fn is not None and i > 0 and t_now < t_switch:
@@ -538,13 +586,18 @@ def guided_sample(
             prot_mask = is_mask_pre & ~is_mask_post  # just-unmasked positions
 
         # 4i-pre. Fresh logits for remasking (Option A)
-        if fresh_logits_for_remask and remasking_fn is not None and i > 0 and t_now < t_switch:
+        if fresh_logits_for_remask and remasking_fn is not None and i > 0 and t_now < t_switch \
+                and not (ema_lock and ema_locked.all()):
             fresh_node_logits, fresh_edge_logits = model(x_t, pad_mask, t_tensor)
             remask_node_logits = fresh_node_logits
             remask_edge_logits = fresh_edge_logits
         else:
             remask_node_logits = node_logits
             remask_edge_logits = edge_logits
+
+        # Save winner tokens for EMA lock restore
+        if ema_lock:
+            x_t_pre_remask = x_t.clone()
 
         # 4i. Remask winner only
         x_t = _single_step_remask(
@@ -553,6 +606,10 @@ def guided_sample(
             confidence_boost=conf_boost,
             protect_mask=prot_mask,
         )
+
+        # Undo remasking for locked samples
+        if ema_lock and ema_locked.any():
+            x_t[ema_locked] = x_t_pre_remask[ema_locked]
 
         # 4j. Compute post-remask reward (use remask logits for consistency)
         if remasking_fn is not None and i > 0 and t_now < t_switch:
@@ -566,6 +623,9 @@ def guided_sample(
                     x_t, remask_node_logits, remask_edge_logits, pad_mask,
                     vocab_config, reward_composer, B,
                 )
+            # Locked samples had remasking undone — reward unchanged
+            if ema_lock and ema_locked.any():
+                reward_post[ema_locked] = reward_pre[ema_locked]
         else:
             reward_post = reward_pre.clone()
 
@@ -633,6 +693,9 @@ def guided_sample(
             violations=violations_selected,
             mean_attribution_boost=mean_boost,
             positions_boosted=n_boosted,
+            samples_locked=(
+                ema_locked.float().mean().item() if ema_lock else 0.0
+            ),
         )
         stats.steps.append(step_stats)
 
@@ -643,6 +706,8 @@ def guided_sample(
             reward_pre_remask=reward_pre,
             reward_post_remask=reward_post,
             violations=violations_selected_per,
+            ema_reward=ema_r.clone() if ema_lock and ema_r is not None else None,
+            locked=ema_locked.clone() if ema_lock else None,
         )
         stats.steps_per_sample.append(step_per_sample)
 
@@ -717,5 +782,8 @@ def guided_sample(
                 )
 
         stats.satisfaction_overall = all_satisfied_count / B
+
+    if ema_lock:
+        stats.lock_steps = ema_lock_step
 
     return x_t, stats

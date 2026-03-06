@@ -7,7 +7,7 @@
 
 
 ## Overall Status
-- Current phase: G5 IN PROGRESS (Rounds 1–5 complete; remasking mitigations concluded; next: selective early-stage remasking or v2)
+- Current phase: G5 IN PROGRESS (Rounds 1–6; adaptive EMA lock implemented; Round 6 awaiting GPU run)
 - Dependencies: v1 pipeline complete, v2 (MELD) trained and evaluated
 
 ### Dependency Graph
@@ -236,7 +236,10 @@ Fine α sweep with revised constraints. Combines constraint revision + finer gri
    - Trajectories confirm persistent oscillation in all remasking variants.
    - **Conclusion**: Structural conflict — no single-step mitigation works. No-remask is best for SVDD.
    - Script: `run_g5_round5.sh`. Output: `comparison_guided_round5.md`.
-9. **Open**: Selective early-stage remasking for constraint scaling (see docs/guidance.md).
+9. **Round 6 — Option A + EMA Lock vs Option B + EMA Lock** (2026-03-06): SCRIPT READY, awaiting GPU.
+   - Adaptive EMA lock: remasking ON early → lock when reward plateaus → no-remask late.
+   - Grid: 2 configs (Option A + lock, Option B + lock) at K=16, α=0.01.
+   - Results dir: `eval_results/loglinear_noise_sc/round6_guid/`
 10. Expand to v2 variants if warranted.
 
 ### Option C — Reward-Attributed Confidence Boosting (2026-03-05)
@@ -284,7 +287,32 @@ Implemented the mitigation for the guidance-remasking conflict: confidence remas
 - `docs/guidance.md` — Round 5 results, verdict, open question on selective early-stage remasking
 - `implementation_state_T1_guidance.md` — Round 5 marked DONE, open question added
 
-**Conclusion**: No-remask + soft reward at K=16, α=0.01 is the current best (69%, 5.2× baseline). Remasking mitigation investigation concluded. Next direction: selective early-stage remasking for constraint scaling.
+**Conclusion**: No-remask + soft reward at K=16, α=0.01 is the current best (69%, 5.2× baseline). Remasking mitigation investigation concluded. Next direction: adaptive EMA lock for early-stage remasking.
+
+### Adaptive EMA Remasking Lock (2026-03-06)
+
+Per-sample adaptive lock: start with remasking ON, track EMA(reward), lock (permanently disable remasking) when d(EMA) ≤ 0 for 3 consecutive steps or at hard deadline t=0.5. β=0.85, per-sample granularity.
+
+**Mechanism:** Save winner tokens before remasking; restore locked samples after. Skip Option A's model call when all locked.
+
+**Files modified:**
+- `bd_gen/guidance/guided_sampler.py` — 4 new params (`ema_lock`, `ema_beta`, `ema_lock_consecutive`, `ema_lock_deadline`), EMA state init, per-step lock logic, save/restore for locked samples, diagnostics (`samples_locked`, `ema_reward`, `locked`, `lock_steps`)
+- `scripts/generate_guided.py` — 4 new CLI flags (`--ema-lock`, `--ema-beta`, `--ema-lock-consecutive`, `--ema-lock-deadline`), stored in payload config
+- `scripts/analyze_guidance_stats.py` — `_extract_sample_trajectory` extracts `ema_reward` and `_lock_step`; `_plot_trajectory_figure` overlays EMA on reward subplot, draws t_lock dashed vertical line on all subplots
+- `docs/guidance.md` — Adaptive EMA Lock section + Round 6 setup
+
+**Files created:**
+- `scripts/run_g5_round6.sh` — Round 6 experiment (Option A + EMA lock, Option B + EMA lock)
+
+**Tests:** 4 new tests in `tests/test_guided_sampler.py` (smoke, deadline, diagnostics, noop). Full suite: 731 passed.
+
+**Backward compatibility:** All changes additive with safe defaults. Feature is opt-in via `ema_lock=True` / `--ema-lock`.
+
+### Round 6 — Option A + EMA Lock vs Option B + EMA Lock (2026-03-06)
+
+**Status:** Script ready, awaiting GPU run on jabiru.
+**Grid:** K=16, α=0.01, soft reward, confidence remasking + EMA lock. 2 configs: Option A + lock, Option B + lock.
+**Results dir:** `eval_results/loglinear_noise_sc/round6_guid/`
 
 ### Files modified
 - `scripts/generate_guided.py` (added `--reward-mode`, `--calibration` CLI overrides)

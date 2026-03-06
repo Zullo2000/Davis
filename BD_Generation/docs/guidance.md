@@ -981,10 +981,65 @@ Both use confidence remasking + soft reward (hard reward was conclusively ruled 
 
 **No-remasking at K=16, α=0.01 remains the best configuration** at 69% overall satisfaction (5.2× the unguided 13.3% baseline). However, the irreversibility of no-remasking poses a scalability concern: as the number of constraints grows, early committed tokens that violate constraints can never be corrected. See §Open Question below.
 
-#### Open Question — Selective remasking for constraint scaling
+### Adaptive EMA Remasking Lock (Implemented 2026-03-06)
 
-Without remasking, the denoising process is fully irreversible: once a token is unmasked, it stays committed forever. This works well with 4 constraints but may degrade as constraint count grows — if two constraint-violating tokens are committed in early steps, the violation can never be resolved.
+The open question from Round 5 — how to get the benefits of early remasking without the late-stage oscillation — is addressed by the **adaptive EMA lock**.
 
-A promising direction: **early-stage remasking** — enable confidence remasking only during initial denoising steps (high noise), then switch to no-remasking for the final phase where guidance needs to lock in gains. The intuition is that early remasking provides error correction when most tokens are still MASK and violations are easily fixable, while late-stage no-remasking prevents the guidance-destroying oscillation we observed.
+**Design:**
+- Start with remasking ON (confidence strategy + Option A or B mitigation)
+- Track per-sample `EMA(reward_selected)` with smoothing factor β=0.85
+- At each denoising step, compute `d_EMA = EMA[t] - EMA[t-1]`
+- When `d_EMA ≤ 0` for 3 consecutive steps → **lock** (permanently disable remasking for that sample)
+- Hard deadline: lock by t=0.5 (step 50/100) regardless of reward dynamics
+- Per-sample granularity: each sample locks independently when its reward plateaus
 
-This connects to the existing `t_switch` parameter (already implemented for turning remasking on/off at a threshold). Further investigation is deferred to a future round.
+**Mechanism — save/restore:**
+- Before remasking: save winner tokens
+- After remasking: restore locked samples' tokens (undo remasking)
+- Option A's fresh-logits model call is skipped when all samples are locked (saves GPU cost)
+- Post-remask reward for locked samples is set to pre-remask reward (consistent diagnostics)
+
+**Parameters:**
+| Parameter | CLI flag | Default | Description |
+|-----------|----------|---------|-------------|
+| `ema_lock` | `--ema-lock` | False | Enable adaptive lock |
+| `ema_beta` | `--ema-beta` | 0.85 | EMA smoothing factor |
+| `ema_lock_consecutive` | `--ema-lock-consecutive` | 3 | Consecutive d_EMA≤0 to trigger |
+| `ema_lock_deadline` | `--ema-lock-deadline` | 0.5 | Hard deadline (fraction of steps) |
+
+**Diagnostics recorded:**
+- `GuidanceStatsStep.samples_locked` — fraction of batch locked at each step
+- `GuidanceStatsStepPerSample.ema_reward` — (B,) EMA trajectory per sample
+- `GuidanceStatsStepPerSample.locked` — (B,) bool per sample
+- `GuidanceStats.lock_steps` — (B,) int, step where each sample locked
+
+**Analysis visualization:**
+- Reward trajectory plots overlay EMA(reward) as a dashed line
+- All per-step subplots show t_lock as a vertical dashed line
+
+**Files modified:**
+- `bd_gen/guidance/guided_sampler.py` — EMA state, lock logic, save/restore, diagnostics
+- `scripts/generate_guided.py` — 4 new CLI flags
+- `scripts/analyze_guidance_stats.py` — EMA + lock overlay in trajectory plots
+
+### Round 6 — Option A + EMA Lock vs Option B + EMA Lock
+
+**Status:** Experiment script ready (`scripts/run_g5_round6.sh`), awaiting GPU run on jabiru.
+
+**Grid:** 2 configs at K=16, α=0.01, soft reward, v1 loglinear:
+1. confidence + Option A (fresh logits) + EMA lock → tag `r6lockA`
+2. confidence + Option B (protect just-unmasked) + EMA lock → tag `r6lockB`
+
+**Comparison targets:**
+| Config | Round | Satisfaction |
+|--------|-------|-------------|
+| no-remask + soft | R4 | 69% |
+| confidence + Option C + soft | R4 | 56% |
+| confidence + Option A + soft (no lock) | R5 | 55% |
+| confidence + Option B + soft (no lock) | R5 | 56% |
+| confidence + Option A + EMA lock | **R6** | ? |
+| confidence + Option B + EMA lock | **R6** | ? |
+
+**Hypothesis:** The EMA lock gives each sample early remasking (error correction) followed by late-stage no-remasking (reward preservation). If remasking's benefit is concentrated in early steps, Round 6 should approach or exceed the 69% no-remask baseline. If the benefit is negligible even early, results will match Round 5 (~55-56%).
+
+**Results saved to:** `eval_results/loglinear_noise_sc/round6_guid/`

@@ -204,6 +204,25 @@ def _parse_guidance_args() -> tuple[argparse.Namespace, list[str]]:
         help="Re-run model on post-unmask winner to get fresh logits for "
              "remasking (Option A). 2x model cost per guided step.",
     )
+    parser.add_argument(
+        "--ema-lock", action="store_true", default=False,
+        help="Adaptively disable remasking per-sample when EMA(reward) "
+             "stops improving.",
+    )
+    parser.add_argument(
+        "--ema-beta", type=float, default=0.85,
+        help="EMA smoothing factor for adaptive lock (default: 0.85).",
+    )
+    parser.add_argument(
+        "--ema-lock-consecutive", type=int, default=3,
+        help="Consecutive non-positive EMA derivatives to trigger lock "
+             "(default: 3).",
+    )
+    parser.add_argument(
+        "--ema-lock-deadline", type=float, default=0.5,
+        help="Hard lock deadline as fraction of total steps "
+             "(default: 0.5 = step 50/100).",
+    )
 
     guidance_args, remaining = parser.parse_known_args()
     return guidance_args, remaining
@@ -374,6 +393,10 @@ def generate_guided_samples(
                     attribution_boost=guidance_args.attribution_boost,
                     protect_just_unmasked=guidance_args.protect_just_unmasked,
                     fresh_logits_for_remask=guidance_args.fresh_logits_remask,
+                    ema_lock=guidance_args.ema_lock,
+                    ema_beta=guidance_args.ema_beta,
+                    ema_lock_consecutive=guidance_args.ema_lock_consecutive,
+                    ema_lock_deadline=guidance_args.ema_lock_deadline,
                     rate_network=rate_network,
                     num_rooms_distribution=num_rooms_dist,
                     device=device,
@@ -441,6 +464,10 @@ def generate_guided_samples(
             "attribution_boost": guidance_args.attribution_boost,
             "protect_just_unmasked": guidance_args.protect_just_unmasked,
             "fresh_logits_remask": guidance_args.fresh_logits_remask,
+            "ema_lock": guidance_args.ema_lock,
+            "ema_beta": guidance_args.ema_beta,
+            "ema_lock_consecutive": guidance_args.ema_lock_consecutive,
+            "ema_lock_deadline": guidance_args.ema_lock_deadline,
         },
         "per_seed": per_seed_data,
         "guidance_stats": per_seed_stats,

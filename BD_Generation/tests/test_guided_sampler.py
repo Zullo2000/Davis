@@ -843,3 +843,149 @@ class TestAttributionBoost:
         assert torch.equal(result_off, result_on), (
             "fresh_logits_for_remask should have no effect when remasking_fn=None"
         )
+
+
+# =========================================================================
+# EMA Lock Tests
+# =========================================================================
+
+
+class TestEmaLock:
+    """Tests for adaptive EMA-based remasking lock."""
+
+    def test_ema_lock_smoke(
+        self, dummy_model, linear_schedule, vocab_config,
+    ):
+        """ema_lock=True with confidence remasking runs without error
+        and populates lock_steps."""
+        from bd_gen.diffusion.remasking import RemaskingSchedule
+
+        remasking_fn = RemaskingSchedule(
+            "confidence", 0.3, linear_schedule, vocab_config,
+        )
+        kitchen_idx = NODE_TYPES.index("Kitchen")
+        constraint = ExactCount(
+            name="one_kitchen", room_type_idx=kitchen_idx, target=1,
+        )
+        composer = RewardComposer(
+            constraints=[constraint], reward_mode="soft",
+        )
+
+        result, stats = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=10, num_candidates=4,
+            guidance_alpha=1.0, top_p=0.9,
+            remasking_fn=remasking_fn,
+            protect_just_unmasked=True,
+            ema_lock=True,
+            ema_beta=0.85,
+            ema_lock_consecutive=3,
+            ema_lock_deadline=0.5,
+            fixed_num_rooms=4,
+        )
+
+        assert result.shape == (2, vocab_config.seq_len)
+        assert len(stats.steps) == 10
+        # lock_steps should be populated
+        assert stats.lock_steps is not None
+        assert stats.lock_steps.shape == (2,)
+        # All samples must have locked (deadline at step 5)
+        assert (stats.lock_steps >= 0).all(), "All samples should be locked"
+
+    def test_ema_lock_deadline_forces_lock(
+        self, dummy_model, linear_schedule, vocab_config,
+    ):
+        """With a very early deadline (0.1 = step 1), all samples should
+        lock by step 1."""
+        from bd_gen.diffusion.remasking import RemaskingSchedule
+
+        remasking_fn = RemaskingSchedule(
+            "confidence", 0.3, linear_schedule, vocab_config,
+        )
+        composer = RewardComposer(constraints=[], reward_mode="soft")
+
+        _, stats = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=4, num_steps=10, num_candidates=4,
+            guidance_alpha=1.0, top_p=0.9,
+            remasking_fn=remasking_fn,
+            ema_lock=True,
+            ema_lock_deadline=0.1,  # step 1 deadline
+            fixed_num_rooms=4,
+        )
+
+        assert stats.lock_steps is not None
+        # All should lock at step 1 (deadline = int(0.1 * 10) = 1)
+        assert (stats.lock_steps <= 1).all(), (
+            f"All samples should lock by step 1, got {stats.lock_steps}"
+        )
+
+    def test_ema_lock_diagnostics_recorded(
+        self, dummy_model, linear_schedule, vocab_config,
+    ):
+        """Verify per-step diagnostics include EMA lock fields."""
+        from bd_gen.diffusion.remasking import RemaskingSchedule
+
+        remasking_fn = RemaskingSchedule(
+            "confidence", 0.3, linear_schedule, vocab_config,
+        )
+        composer = RewardComposer(constraints=[], reward_mode="soft")
+
+        _, stats = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=5, num_candidates=4,
+            guidance_alpha=1.0, top_p=0.9,
+            remasking_fn=remasking_fn,
+            ema_lock=True,
+            fixed_num_rooms=4,
+        )
+
+        # Check batch-level stats have samples_locked
+        for step in stats.steps:
+            assert "samples_locked" in step
+            assert 0.0 <= step["samples_locked"] <= 1.0
+
+        # Check per-sample stats have ema_reward and locked
+        for step_ps in stats.steps_per_sample:
+            assert "ema_reward" in step_ps
+            assert "locked" in step_ps
+            if step_ps["ema_reward"] is not None:
+                assert step_ps["ema_reward"].shape == (2,)
+            if step_ps["locked"] is not None:
+                assert step_ps["locked"].shape == (2,)
+
+    def test_ema_lock_noop_without_remasking(
+        self, dummy_model, linear_schedule, vocab_config,
+    ):
+        """ema_lock=True with remasking_fn=None should produce same output
+        as ema_lock=False (lock has nothing to disable)."""
+        composer = RewardComposer(constraints=[], reward_mode="soft")
+
+        torch.manual_seed(42)
+        result_off, _ = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=5, num_candidates=4,
+            guidance_alpha=1.0, temperature=0.0,
+            remasking_fn=None,
+            ema_lock=False,
+            fixed_num_rooms=4,
+        )
+
+        torch.manual_seed(42)
+        result_on, _ = guided_sample(
+            dummy_model, linear_schedule, vocab_config,
+            reward_composer=composer,
+            batch_size=2, num_steps=5, num_candidates=4,
+            guidance_alpha=1.0, temperature=0.0,
+            remasking_fn=None,
+            ema_lock=True,
+            fixed_num_rooms=4,
+        )
+
+        assert torch.equal(result_off, result_on), (
+            "ema_lock should have no effect when remasking_fn=None"
+        )
